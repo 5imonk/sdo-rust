@@ -1,11 +1,53 @@
 use acap::chebyshev::chebyshev_distance;
 use acap::coords::Coordinates;
-use acap::distance::Distance;
+use acap::distance::{Distance, Proximity};
 use acap::euclid::euclidean_distance;
 use acap::lp::lp_distance;
 use acap::taxi::taxicab_distance;
 
-/// Wrapper für Vec<f64> um acap Traits zu implementieren
+/// Minkowski/Lp Wrapper für Vec<f64>
+#[derive(Clone, Debug)]
+pub struct Minkowski {
+    data: Vec<f64>,
+    p: f64,
+}
+
+impl Minkowski {
+    pub fn new(data: Vec<f64>, p: f64) -> Self {
+        Self { data, p }
+    }
+}
+
+impl Coordinates for Minkowski {
+    type Value = f64;
+
+    fn dims(&self) -> usize {
+        self.data.len()
+    }
+
+    fn coord(&self, i: usize) -> Self::Value {
+        self.data[i]
+    }
+}
+
+impl Proximity for Minkowski {
+    type Distance = f64;
+
+    fn distance(&self, other: &Minkowski) -> Self::Distance {
+        lp_distance(self.p, self, other)
+    }
+}
+
+/// Observer-Struktur mit Daten, Beobachtungen und Index
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Felder werden in Zukunft verwendet
+pub struct Observer {
+    pub data: Vec<f64>,
+    pub observations: f64,
+    pub index: usize,
+}
+
+/// Wrapper für Vec<f64> um acap Traits zu implementieren (für Kompatibilität)
 #[derive(Clone, Debug)]
 pub struct Point(pub Vec<f64>);
 
