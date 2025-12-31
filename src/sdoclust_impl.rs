@@ -6,8 +6,8 @@ use rand::thread_rng;
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
-use crate::sdo_impl::{DistanceMetric, Point};
-use crate::utils::euclidean_distance;
+use crate::sdo_impl::DistanceMetric;
+use crate::utils::{compute_distance, Point};
 
 /// Union-Find Datenstruktur für Connected Components
 struct UnionFind {
@@ -55,10 +55,7 @@ impl UnionFind {
         // Gruppiere nach Root
         let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
         for i in 0..n {
-            components
-                .entry(self.parent[i])
-                .or_insert_with(Vec::new)
-                .push(i);
+            components.entry(self.parent[i]).or_default().push(i);
         }
 
         components.into_values().collect()
@@ -190,11 +187,20 @@ impl SDOclust {
             .collect();
 
         // Schritt 2: Observe (wie SDO)
+        // Temporäre Instanz für count_points_in_neighborhood
+        let temp_metric = params.get_metric();
+        let temp_p = params.minkowski_p;
         let mut observations: Vec<(usize, usize)> = observers
             .iter()
             .enumerate()
             .map(|(idx, observer)| {
-                let count = Self::count_points_in_neighborhood(observer, &data_vec, params.x);
+                let count = Self::count_points_in_neighborhood_static(
+                    observer,
+                    &data_vec,
+                    params.x,
+                    temp_metric,
+                    temp_p,
+                );
                 (idx, count)
             })
             .collect();
@@ -377,13 +383,18 @@ impl SDOclust {
         }
     }
 
-    fn count_points_in_neighborhood(observer: &[f64], data: &[Vec<f64>], x: usize) -> usize {
-        // Verwende euklidische Distanz für count (kann später angepasst werden)
+    fn count_points_in_neighborhood_static(
+        observer: &[f64],
+        data: &[Vec<f64>],
+        x: usize,
+        metric: DistanceMetric,
+        minkowski_p: Option<f64>,
+    ) -> usize {
         let mut distances: Vec<(usize, f64)> = data
             .iter()
             .enumerate()
             .map(|(idx, point)| {
-                let dist = euclidean_distance(observer, point);
+                let dist = Self::compute_distance_static(observer, point, metric, minkowski_p);
                 (idx, dist)
             })
             .collect();
@@ -399,34 +410,17 @@ impl SDOclust {
         count.min(x)
     }
 
+    fn compute_distance_static(
+        a: &[f64],
+        b: &[f64],
+        metric: DistanceMetric,
+        minkowski_p: Option<f64>,
+    ) -> f64 {
+        compute_distance(a, b, metric, minkowski_p)
+    }
+
     fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
-        match self.distance_metric {
-            DistanceMetric::Euclidean => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).powi(2))
-                .sum::<f64>()
-                .sqrt(),
-            DistanceMetric::Manhattan => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).abs())
-                .sum::<f64>(),
-            DistanceMetric::Chebyshev => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0, f64::max),
-            DistanceMetric::Minkowski => {
-                let p = self.minkowski_p.unwrap_or(3.0);
-                let sum: f64 = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).abs().powf(p))
-                    .sum();
-                sum.powf(1.0 / p)
-            }
-        }
+        compute_distance(a, b, self.distance_metric, self.minkowski_p)
     }
 
     fn predict_brute_force(&self, point: &[f64]) -> i32 {

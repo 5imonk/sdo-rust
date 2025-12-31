@@ -6,6 +6,8 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::f64;
 
+use crate::utils::{compute_distance, Point};
+
 /// Distanzfunktion für SDO
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -55,22 +57,6 @@ impl SDOParams {
             "minkowski" => DistanceMetric::Minkowski,
             _ => DistanceMetric::Euclidean,
         }
-    }
-}
-
-/// Wrapper für Vec<f64> um acap Traits zu implementieren
-#[derive(Clone, Debug)]
-pub struct Point(pub Vec<f64>);
-
-impl acap::coords::Coordinates for Point {
-    type Value = f64;
-
-    fn dims(&self) -> usize {
-        self.0.len()
-    }
-
-    fn coord(&self, i: usize) -> Self::Value {
-        self.0[i]
     }
 }
 
@@ -245,33 +231,7 @@ impl SDO {
 
 impl SDO {
     fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
-        match self.distance_metric {
-            DistanceMetric::Euclidean => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).powi(2))
-                .sum::<f64>()
-                .sqrt(),
-            DistanceMetric::Manhattan => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).abs())
-                .sum::<f64>(),
-            DistanceMetric::Chebyshev => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0, f64::max),
-            DistanceMetric::Minkowski => {
-                let p = self.minkowski_p.unwrap_or(3.0);
-                let sum: f64 = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).abs().powf(p))
-                    .sum();
-                sum.powf(1.0 / p)
-            }
-        }
+        compute_distance(a, b, self.distance_metric, self.minkowski_p)
     }
 
     fn count_points_in_neighborhood(&self, observer: &[f64], data: &[Vec<f64>], x: usize) -> usize {
