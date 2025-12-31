@@ -1,12 +1,20 @@
-use kdtree::distance::squared_euclidean;
-use kdtree::KdTree;
+use acap::kd::KdTree;
+use acap::Proximity;
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::f64;
 
-use crate::utils::euclidean_distance;
+/// Distanzfunktion für SDO
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DistanceMetric {
+    Euclidean = 0,
+    Manhattan = 1,
+    Chebyshev = 2,
+    Minkowski = 3,
+}
 
 /// Parameter-Struktur für SDO
 #[pyclass]
@@ -18,13 +26,66 @@ pub struct SDOParams {
     pub x: usize,
     #[pyo3(get, set)]
     pub rho: f64,
+    #[pyo3(get, set)]
+    pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
+    #[pyo3(get, set)]
+    pub minkowski_p: Option<f64>, // Für Minkowski-Distanz
 }
 
 #[pymethods]
 impl SDOParams {
     #[new]
-    pub fn new(k: usize, x: usize, rho: f64) -> Self {
-        Self { k, x, rho }
+    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None))]
+    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>) -> Self {
+        Self {
+            k,
+            x,
+            rho,
+            distance,
+            minkowski_p,
+        }
+    }
+}
+
+impl SDOParams {
+    fn get_metric(&self) -> DistanceMetric {
+        match self.distance.to_lowercase().as_str() {
+            "manhattan" => DistanceMetric::Manhattan,
+            "chebyshev" => DistanceMetric::Chebyshev,
+            "minkowski" => DistanceMetric::Minkowski,
+            _ => DistanceMetric::Euclidean,
+        }
+    }
+}
+
+/// Wrapper für Vec<f64> um acap Traits zu implementieren
+#[derive(Clone, Debug)]
+pub struct Point(pub Vec<f64>);
+
+impl acap::coords::Coordinates for Point {
+    type Value = f64;
+
+    fn dims(&self) -> usize {
+        self.0.len()
+    }
+
+    fn coord(&self, i: usize) -> Self::Value {
+        self.0[i]
+    }
+}
+
+// Implementiere Proximity mit euklidischer Distanz (für kd-tree)
+impl Proximity<Point> for Point {
+    type Distance = f64;
+
+    fn distance(&self, other: &Point) -> Self::Distance {
+        // Euklidische Distanz für kd-tree (kann später durch gewählte Metrik ersetzt werden)
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
     }
 }
 
@@ -33,7 +94,9 @@ impl SDOParams {
 pub struct SDO {
     // Entferne #[pyo3(get, set)] um Konflikt mit get_active_observers() zu vermeiden
     active_observers: Vec<Vec<f64>>,
-    kdtree: KdTree<f64, usize, Vec<f64>>,
+    kdtree: Option<KdTree<Point>>,
+    distance_metric: DistanceMetric,
+    minkowski_p: Option<f64>,
     #[pyo3(get, set)]
     x: usize,
 }
@@ -44,17 +107,15 @@ impl SDO {
     pub fn new() -> Self {
         Self {
             active_observers: Vec::new(),
-            kdtree: KdTree::new(2),
+            kdtree: None,
+            distance_metric: DistanceMetric::Euclidean,
+            minkowski_p: None,
             x: 10,
         }
     }
 
     /// Lernt das Modell aus den Daten
-    pub fn learn(
-        &mut self,
-        data: PyReadonlyArray2<f64>,
-        params: &SDOParams,
-    ) -> PyResult<()> {
+    pub fn learn(&mut self, data: PyReadonlyArray2<f64>, params: &SDOParams) -> PyResult<()> {
         let data_slice = data.as_array();
         let rows = data_slice.nrows();
         let cols = data_slice.ncols();
@@ -69,7 +130,8 @@ impl SDO {
             .collect();
 
         self.x = params.x;
-        let dimension = data_vec[0].len();
+        self.distance_metric = params.get_metric();
+        self.minkowski_p = params.minkowski_p;
 
         // Schritt 1: Sample
         let mut rng = thread_rng();
@@ -100,16 +162,13 @@ impl SDO {
             .map(|&(idx, _)| observers[idx].clone())
             .collect();
 
-        // Baue kd-tree
-        self.kdtree = KdTree::new(dimension);
-        for (idx, observer) in self.active_observers.iter().enumerate() {
-            if let Err(e) = self.kdtree.add(observer.clone(), idx) {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Fehler beim Hinzufügen zum kd-tree: {:?}",
-                    e
-                )));
-            }
-        }
+        // Baue kd-tree mit acap
+        let points: Vec<Point> = self
+            .active_observers
+            .iter()
+            .map(|v| Point(v.clone()))
+            .collect();
+        self.kdtree = Some(KdTree::from_iter(points));
 
         Ok(())
     }
@@ -133,33 +192,31 @@ impl SDO {
 
         let k = self.x.min(self.active_observers.len());
 
-        match self.kdtree.nearest(&point_vec, k, &squared_euclidean) {
-            Ok(neighbors) => {
-                if neighbors.is_empty() {
-                    return Ok(f64::INFINITY);
-                }
+        // Verwende Brute-Force mit gewählter Distanzfunktion
+        // (kd-tree wird für andere Metriken als Euclidean nicht optimal genutzt)
+        let mut distances: Vec<f64> = self
+            .active_observers
+            .iter()
+            .map(|observer| self.compute_distance(&point_vec, observer))
+            .collect();
 
-                let mut distances: Vec<f64> = neighbors
-                    .iter()
-                    .map(|(dist_squared, _)| dist_squared.sqrt())
-                    .collect();
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-                distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let k_actual = k.min(distances.len());
+        let relevant_distances: Vec<f64> = distances.into_iter().take(k_actual).collect();
 
-                let mid = distances.len() / 2;
-                let median = if distances.len() % 2 == 0 && mid > 0 {
-                    (distances[mid - 1] + distances[mid]) / 2.0
-                } else {
-                    distances[mid]
-                };
-
-                Ok(median)
-            }
-            Err(_) => {
-                // Fallback auf Brute-Force
-                Ok(self.predict_brute_force(&point_vec))
-            }
+        if relevant_distances.is_empty() {
+            return Ok(f64::INFINITY);
         }
+
+        let mid = relevant_distances.len() / 2;
+        let median = if relevant_distances.len().is_multiple_of(2) && mid > 0 {
+            (relevant_distances[mid - 1] + relevant_distances[mid]) / 2.0
+        } else {
+            relevant_distances[mid]
+        };
+
+        Ok(median)
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -187,12 +244,42 @@ impl SDO {
 }
 
 impl SDO {
+    fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
+        match self.distance_metric {
+            DistanceMetric::Euclidean => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f64>()
+                .sqrt(),
+            DistanceMetric::Manhattan => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .sum::<f64>(),
+            DistanceMetric::Chebyshev => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0, f64::max),
+            DistanceMetric::Minkowski => {
+                let p = self.minkowski_p.unwrap_or(3.0);
+                let sum: f64 = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| (x - y).abs().powf(p))
+                    .sum();
+                sum.powf(1.0 / p)
+            }
+        }
+    }
+
     fn count_points_in_neighborhood(&self, observer: &[f64], data: &[Vec<f64>], x: usize) -> usize {
         let mut distances: Vec<(usize, f64)> = data
             .iter()
             .enumerate()
             .map(|(idx, point)| {
-                let dist = squared_euclidean(observer, point);
+                let dist = self.compute_distance(observer, point);
                 (idx, dist)
             })
             .collect();
@@ -207,30 +294,6 @@ impl SDO {
         }
         count.min(x)
     }
-
-    fn predict_brute_force(&self, point: &[f64]) -> f64 {
-        let mut distances: Vec<f64> = self
-            .active_observers
-            .iter()
-            .map(|observer| euclidean_distance(point, observer))
-            .collect();
-
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let k = self.x.min(distances.len());
-        let relevant_distances: Vec<f64> = distances.into_iter().take(k).collect();
-
-        if relevant_distances.is_empty() {
-            return f64::INFINITY;
-        }
-
-        let mid = relevant_distances.len() / 2;
-        if relevant_distances.len() % 2 == 0 && mid > 0 {
-            (relevant_distances[mid - 1] + relevant_distances[mid]) / 2.0
-        } else {
-            relevant_distances[mid]
-        }
-    }
 }
 
 impl Default for SDO {
@@ -238,4 +301,3 @@ impl Default for SDO {
         Self::new()
     }
 }
-
