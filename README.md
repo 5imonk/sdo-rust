@@ -22,8 +22,8 @@ High-performance implementation of the Sparse Data Observers (SDO) algorithm and
 
 ```bash
 # Clone the repository
-git clone https://github.com/USERNAME/sdo.git
-cd sdo
+git clone https://github.com/5imonk/sdo-rust.git
+cd sdo-rust
 
 # Create virtual environment
 python3 -m venv .venv
@@ -54,7 +54,9 @@ data = np.array([
 ], dtype=np.float64)
 
 # Train the model
-sdo.learn(data, k=5, x=3, rho=0.2)
+from sdo import SDOParams
+params = SDOParams(k=5, x=3, rho=0.2)
+sdo.learn(data, params)
 
 # Predict outlier score
 point = np.array([[10.0, 11.0]], dtype=np.float64)
@@ -78,7 +80,9 @@ cluster2 = np.random.randn(30, 2) * 0.5 + np.array([8.0, 8.0])
 data = np.vstack([cluster1, cluster2]).astype(np.float64)
 
 # Train the model
-sdoclust.learn(data, k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+from sdo import SDOclustParams
+params = SDOclustParams(k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+sdoclust.learn(data, params)
 
 # Predict cluster label
 point = np.array([[2.0, 2.0]], dtype=np.float64)

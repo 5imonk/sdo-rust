@@ -4,7 +4,7 @@ Vollständiges Testskript für das SDO (Sparse Data Observers) Python-Modul
 """
 
 import numpy as np
-from sdo import SDO
+from sdo import SDO, SDOParams
 
 def test_basic_usage():
     """Grundlegende Verwendung des SDO-Algorithmus"""
@@ -38,7 +38,8 @@ def test_basic_usage():
     print("Lerne SDO-Modell...")
     
     # Lerne das Modell: k=8 Observer, x=3 Nachbarn, rho=0.2 (behalte 80% der Observer)
-    sdo.learn(data, k=8, x=3, rho=0.2)
+    params = SDOParams(k=8, x=3, rho=0.2)
+    sdo.learn(data, params)
     print(f"✓ Modell trainiert")
     print(f"  - Anzahl aktiver Observer: {sdo.x}")
     
@@ -104,7 +105,8 @@ def test_larger_dataset():
     
     # Lerne mit größerem Datensatz
     sdo = SDO()
-    sdo.learn(all_data, k=20, x=5, rho=0.3)
+    params = SDOParams(k=20, x=5, rho=0.3)
+    sdo.learn(all_data, params)
     print(f"✓ Modell trainiert mit {sdo.x} aktiven Observern")
     
     # Berechne Scores für alle Punkte
@@ -164,7 +166,8 @@ def test_different_parameters():
     
     for params in param_sets:
         sdo = SDO()
-        sdo.learn(all_data, k=params["k"], x=params["x"], rho=params["rho"])
+        sdo_params = SDOParams(k=params["k"], x=params["x"], rho=params["rho"])
+        sdo.learn(all_data, sdo_params)
         score = sdo.predict(test_point)
         
         print(f"  {params['name']:12} (k={params['k']:2}, x={params['x']}, rho={params['rho']:.1f}): "
@@ -184,7 +187,8 @@ def test_edge_cases():
     sdo = SDO()
     empty_data = np.array([[]], dtype=np.float64).reshape(0, 2)
     try:
-        sdo.learn(empty_data, k=5, x=3, rho=0.2)
+        params = SDOParams(k=5, x=3, rho=0.2)
+        sdo.learn(empty_data, params)
         print("  ✓ Leere Daten werden korrekt behandelt")
     except Exception as e:
         print(f"  ✗ Fehler: {e}")
@@ -193,7 +197,8 @@ def test_edge_cases():
     print("\nTest 4.2: Einzelner Datenpunkt")
     single_point = np.array([[1.0, 2.0]], dtype=np.float64)
     sdo = SDO()
-    sdo.learn(single_point, k=1, x=1, rho=0.0)
+    params = SDOParams(k=1, x=1, rho=0.0)
+    sdo.learn(single_point, params)
     score = sdo.predict(single_point)
     print(f"  ✓ Einzelner Punkt: Score = {score:.4f}")
     
@@ -201,7 +206,8 @@ def test_edge_cases():
     print("\nTest 4.3: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float64)
     sdo = SDO()
-    sdo.learn(few_data, k=2, x=1, rho=0.1)
+    params = SDOParams(k=2, x=1, rho=0.1)
+    sdo.learn(few_data, params)
     test_point = np.array([[10.0, 10.0]], dtype=np.float64)
     score = sdo.predict(test_point)
     print(f"  ✓ Wenige Daten: Score = {score:.4f}")
@@ -210,7 +216,8 @@ def test_edge_cases():
     print("\nTest 4.4: 1D-Daten")
     data_1d = np.array([[1.0], [2.0], [3.0], [10.0]], dtype=np.float64)
     sdo = SDO()
-    sdo.learn(data_1d, k=2, x=2, rho=0.2)
+    params = SDOParams(k=2, x=2, rho=0.2)
+    sdo.learn(data_1d, params)
     point_1d = np.array([[5.0]], dtype=np.float64)
     score = sdo.predict(point_1d)
     print(f"  ✓ 1D-Daten: Score = {score:.4f}")
@@ -237,7 +244,8 @@ def test_performance():
         # Training
         sdo = SDO()
         start = time.time()
-        sdo.learn(data, k=min(50, size//10), x=5, rho=0.2)
+        params = SDOParams(k=min(50, size//10), x=5, rho=0.2)
+        sdo.learn(data, params)
         train_time = time.time() - start
         
         # Prediction
@@ -273,7 +281,8 @@ def test_3d_data():
     print(f"3D-Daten: {all_data.shape[0]} Punkte, {all_data.shape[1]} Dimensionen")
     
     sdo = SDO()
-    sdo.learn(all_data, k=15, x=5, rho=0.2)
+    params = SDOParams(k=15, x=5, rho=0.2)
+    sdo.learn(all_data, params)
     print(f"✓ Modell trainiert")
     
     # Teste verschiedene Punkte

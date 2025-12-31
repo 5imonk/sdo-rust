@@ -4,7 +4,7 @@ Einfaches Beispiel für die Verwendung von SDO
 """
 
 import numpy as np
-from sdo import SDO
+from sdo import SDO, SDOParams
 
 # Erstelle SDO-Instanz
 sdo = SDO()
@@ -18,7 +18,8 @@ data = np.array([
 
 # Trainiere das Modell
 print("Trainiere SDO-Modell...")
-sdo.learn(data, k=5, x=3, rho=0.2)
+params = SDOParams(k=5, x=3, rho=0.2)
+sdo.learn(data, params)
 print(f"✓ Fertig! {sdo.x} aktive Observer")
 
 # Teste einen Punkt
