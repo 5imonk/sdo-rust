@@ -1,12 +1,11 @@
 use acap::kd::KdTree;
-use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
+use acap::vp::VpTree;
+use numpy::{PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
-use crate::sdo_impl::DistanceMetric;
+use crate::sdo_impl::{SDOParams, SpatialTree, TreeType, SDO};
 use crate::utils::{compute_distance, Point};
 
 /// Union-Find Datenstruktur für Connected Components
@@ -82,12 +81,15 @@ pub struct SDOclustParams {
     pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
     #[pyo3(get, set)]
     pub minkowski_p: Option<f64>, // Für Minkowski-Distanz
+    #[pyo3(get, set)]
+    pub tree_type: String, // "vptree" (default) oder "kdtree"
 }
 
 #[pymethods]
+#[allow(clippy::too_many_arguments)]
 impl SDOclustParams {
     #[new]
-    #[pyo3(signature = (k, x, rho, chi, zeta, min_cluster_size, distance = "euclidean".to_string(), minkowski_p = None))]
+    #[pyo3(signature = (k, x, rho, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, tree_type = "vptree".to_string()))]
     pub fn new(
         k: usize,
         x: usize,
@@ -97,6 +99,7 @@ impl SDOclustParams {
         min_cluster_size: usize,
         distance: String,
         minkowski_p: Option<f64>,
+        tree_type: String,
     ) -> Self {
         Self {
             k,
@@ -107,17 +110,16 @@ impl SDOclustParams {
             min_cluster_size,
             distance,
             minkowski_p,
+            tree_type,
         }
     }
 }
 
 impl SDOclustParams {
-    fn get_metric(&self) -> DistanceMetric {
-        match self.distance.to_lowercase().as_str() {
-            "manhattan" => DistanceMetric::Manhattan,
-            "chebyshev" => DistanceMetric::Chebyshev,
-            "minkowski" => DistanceMetric::Minkowski,
-            _ => DistanceMetric::Euclidean,
+    fn get_tree_type(&self) -> TreeType {
+        match self.tree_type.to_lowercase().as_str() {
+            "kdtree" => TreeType::KdTree,
+            _ => TreeType::VpTree, // Default: VpTree
         }
     }
 }
@@ -125,13 +127,9 @@ impl SDOclustParams {
 /// Sparse Data Observers Clustering (SDOclust) Algorithm
 #[pyclass]
 pub struct SDOclust {
-    active_observers: Vec<Vec<f64>>,
-    kdtree: Option<KdTree<Point>>,
+    sdo: SDO, // Internes SDO-Objekt für Modell-Erstellung
+    tree_active: Option<SpatialTree>,
     observer_labels: Vec<i32>, // Label für jeden Observer (-1 = entfernt)
-    distance_metric: DistanceMetric,
-    minkowski_p: Option<f64>,
-    #[pyo3(get, set)]
-    x: usize,
     #[pyo3(get, set)]
     chi: usize, // χ - Anzahl der nächsten Observer für lokale Thresholds
     #[pyo3(get, set)]
@@ -145,12 +143,9 @@ impl SDOclust {
     #[new]
     pub fn new() -> Self {
         Self {
-            active_observers: Vec::new(),
-            kdtree: None,
+            sdo: SDO::new(),
+            tree_active: None,
             observer_labels: Vec::new(),
-            distance_metric: DistanceMetric::Euclidean,
-            minkowski_p: None,
-            x: 10,
             chi: 4,
             zeta: 0.5,
             min_cluster_size: 2,
@@ -161,84 +156,60 @@ impl SDOclust {
     pub fn learn(&mut self, data: PyReadonlyArray2<f64>, params: &SDOclustParams) -> PyResult<()> {
         let data_slice = data.as_array();
         let rows = data_slice.nrows();
-        let cols = data_slice.ncols();
 
         if rows == 0 || params.k == 0 {
             return Ok(());
         }
 
-        self.x = params.x;
         self.chi = params.chi;
         self.zeta = params.zeta;
         self.min_cluster_size = params.min_cluster_size;
-        self.distance_metric = params.get_metric();
-        self.minkowski_p = params.minkowski_p;
 
-        // Konvertiere NumPy-Array zu Vec<Vec<f64>>
-        let data_vec: Vec<Vec<f64>> = (0..rows)
-            .map(|i| (0..cols).map(|j| data_slice[[i, j]]).collect())
-            .collect();
+        // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
+        let sdo_params = SDOParams::new(
+            params.k,
+            params.x,
+            params.rho,
+            params.distance.clone(),
+            params.minkowski_p,
+            params.tree_type.clone(),
+        );
+        self.sdo.learn(data, &sdo_params)?;
 
-        // Schritt 1: Sample (wie SDO)
-        let mut rng = thread_rng();
-        let observers: Vec<Vec<f64>> = data_vec
-            .choose_multiple(&mut rng, params.k.min(data_vec.len()))
-            .cloned()
-            .collect();
-
-        // Schritt 2: Observe (wie SDO)
-        // Temporäre Instanz für count_points_in_neighborhood
-        let temp_metric = params.get_metric();
-        let temp_p = params.minkowski_p;
-        let mut observations: Vec<(usize, usize)> = observers
-            .iter()
-            .enumerate()
-            .map(|(idx, observer)| {
-                let count = Self::count_points_in_neighborhood_static(
-                    observer,
-                    &data_vec,
-                    params.x,
-                    temp_metric,
-                    temp_p,
-                );
-                (idx, count)
-            })
-            .collect();
-
-        // Schritt 3: Clean model (wie SDO)
-        observations.sort_by_key(|&(_, count)| count);
-        let num_active = ((observers.len() as f64) * (1.0 - params.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(observers.len());
-
-        self.active_observers = observations
-            .iter()
-            .rev()
-            .take(num_active)
-            .map(|&(idx, _)| observers[idx].clone())
-            .collect();
+        // Hole active_observers aus SDO
+        let active_observers = self.sdo.get_active_observers_internal().clone();
 
         // Schritt 4: Clustering
-        self.perform_clustering()?;
+        self.perform_clustering(&active_observers)?;
 
         // Schritt 5: Entferne kleine Cluster
         self.remove_small_clusters();
 
-        // Baue kd-tree nur für aktive Observer mit Labels
-        let points: Vec<Point> = self
-            .active_observers
+        // Baue Tree nur für aktive Observer mit Labels
+        let points: Vec<Point> = active_observers
             .iter()
             .enumerate()
-            .filter(|(idx, _)| self.observer_labels[*idx] >= 0)
+            .filter(|(idx, _)| *idx < self.observer_labels.len() && self.observer_labels[*idx] >= 0)
             .map(|(_, observer)| Point(observer.clone()))
             .collect();
-        self.kdtree = Some(KdTree::from_iter(points));
+
+        self.tree_active = match params.get_tree_type() {
+            TreeType::VpTree => Some(SpatialTree::Vp(VpTree::balanced(points))),
+            TreeType::KdTree => Some(SpatialTree::Kd(KdTree::from_iter(points))),
+        };
 
         Ok(())
     }
 
+    /// Berechnet den Outlier-Score für einen Datenpunkt (wie SDO)
+    pub fn predict_outlier_score(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
+        self.sdo.predict(point)
+    }
+
     /// Berechnet das Cluster-Label für einen Datenpunkt
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<i32> {
-        if self.active_observers.is_empty() {
+        let active_observers = self.sdo.get_active_observers_internal();
+        if active_observers.is_empty() {
             return Ok(-1); // Kein Label (Outlier)
         }
 
@@ -254,7 +225,7 @@ impl SDOclust {
             .collect();
 
         // Verwende Brute-Force mit gewählter Distanzfunktion
-        Ok(self.predict_brute_force(&point_vec))
+        Ok(self.predict_brute_force(&point_vec, active_observers))
     }
 
     /// Gibt die Anzahl der Cluster zurück
@@ -268,6 +239,12 @@ impl SDOclust {
         unique_labels.len()
     }
 
+    /// Gibt x (Anzahl der Nachbarn) zurück
+    #[getter]
+    pub fn x(&self) -> usize {
+        self.sdo.get_x_internal()
+    }
+
     /// Gibt die Labels der Observer zurück
     pub fn get_observer_labels(&self) -> Vec<i32> {
         self.observer_labels.clone()
@@ -275,46 +252,29 @@ impl SDOclust {
 
     /// Konvertiert active_observers zu NumPy-Array für Python
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
-        if self.active_observers.is_empty() {
-            let array = PyArray2::zeros_bound(py, (0, 0), false);
-            return Ok(array.unbind());
-        }
-
-        let rows = self.active_observers.len();
-        let cols = self.active_observers[0].len();
-        let array = PyArray2::zeros_bound(py, (rows, cols), false);
-
-        unsafe {
-            let mut array_mut = array.as_array_mut();
-            for (i, observer) in self.active_observers.iter().enumerate() {
-                for (j, &value) in observer.iter().enumerate() {
-                    array_mut[[i, j]] = value;
-                }
-            }
-        }
-
-        Ok(array.unbind())
+        self.sdo.get_active_observers(py)
     }
 }
 
 impl SDOclust {
-    fn perform_clustering(&mut self) -> PyResult<()> {
-        let n = self.active_observers.len();
+    fn perform_clustering(&mut self, active_observers: &[Vec<f64>]) -> PyResult<()> {
+        let n = active_observers.len();
         if n == 0 {
             return Ok(());
         }
 
         // Schritt 1: Berechne lokale Cutoff-Thresholds h_ω
         let mut local_thresholds = vec![0.0; n];
+        let distance_metric = self.sdo.get_distance_metric_internal();
+        let minkowski_p = self.sdo.get_minkowski_p_internal();
 
         // Berechne lokale Thresholds mit Brute-Force (mit gewählter Distanzfunktion)
-        for (idx, observer) in self.active_observers.iter().enumerate() {
-            let mut distances: Vec<f64> = self
-                .active_observers
+        for (idx, observer) in active_observers.iter().enumerate() {
+            let mut distances: Vec<f64> = active_observers
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != idx)
-                .map(|(_, other)| self.compute_distance(observer, other))
+                .map(|(_, other)| compute_distance(observer, other, distance_metric, minkowski_p))
                 .collect();
 
             distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -341,8 +301,12 @@ impl SDOclust {
         let mut uf = UnionFind::new(n);
         for i in 0..n {
             for j in (i + 1)..n {
-                let dist =
-                    self.compute_distance(&self.active_observers[i], &self.active_observers[j]);
+                let dist = compute_distance(
+                    &active_observers[i],
+                    &active_observers[j],
+                    distance_metric,
+                    minkowski_p,
+                );
                 if dist < final_thresholds[i] && dist < final_thresholds[j] {
                     uf.union(i, j);
                 }
@@ -383,57 +347,25 @@ impl SDOclust {
         }
     }
 
-    fn count_points_in_neighborhood_static(
-        observer: &[f64],
-        data: &[Vec<f64>],
-        x: usize,
-        metric: DistanceMetric,
-        minkowski_p: Option<f64>,
-    ) -> usize {
-        let mut distances: Vec<(usize, f64)> = data
+    fn predict_brute_force(&self, point: &[f64], active_observers: &[Vec<f64>]) -> i32 {
+        let distance_metric = self.sdo.get_distance_metric_internal();
+        let minkowski_p = self.sdo.get_minkowski_p_internal();
+        let x = self.sdo.get_x_internal();
+
+        let mut distances: Vec<(usize, f64)> = active_observers
             .iter()
             .enumerate()
-            .map(|(idx, point)| {
-                let dist = Self::compute_distance_static(observer, point, metric, minkowski_p);
-                (idx, dist)
+            .map(|(idx, observer)| {
+                (
+                    idx,
+                    compute_distance(point, observer, distance_metric, minkowski_p),
+                )
             })
             .collect();
 
         distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-        let mut count = 0;
-        for (idx, _) in distances.iter().skip(1).take(x) {
-            if data[*idx] != observer {
-                count += 1;
-            }
-        }
-        count.min(x)
-    }
-
-    fn compute_distance_static(
-        a: &[f64],
-        b: &[f64],
-        metric: DistanceMetric,
-        minkowski_p: Option<f64>,
-    ) -> f64 {
-        compute_distance(a, b, metric, minkowski_p)
-    }
-
-    fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
-        compute_distance(a, b, self.distance_metric, self.minkowski_p)
-    }
-
-    fn predict_brute_force(&self, point: &[f64]) -> i32 {
-        let mut distances: Vec<(usize, f64)> = self
-            .active_observers
-            .iter()
-            .enumerate()
-            .map(|(idx, observer)| (idx, self.compute_distance(point, observer)))
-            .collect();
-
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-        let k = self.x.min(distances.len());
+        let k = x.min(distances.len());
         let mut label_counts: HashMap<i32, usize> = HashMap::new();
 
         for (idx, _) in distances.iter().take(k) {

@@ -1,4 +1,5 @@
 use acap::kd::KdTree;
+use acap::vp::VpTree;
 use acap::Proximity;
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
@@ -18,6 +19,21 @@ pub enum DistanceMetric {
     Minkowski = 3,
 }
 
+/// Tree-Typ für die räumliche Indexierung
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TreeType {
+    VpTree = 0,
+    KdTree = 1,
+}
+
+/// Enum für beide Tree-Typen
+#[allow(dead_code)]
+pub(crate) enum SpatialTree {
+    Vp(VpTree<Point>),
+    Kd(KdTree<Point>),
+}
+
 /// Parameter-Struktur für SDO
 #[pyclass]
 #[derive(Clone)]
@@ -32,19 +48,29 @@ pub struct SDOParams {
     pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
     #[pyo3(get, set)]
     pub minkowski_p: Option<f64>, // Für Minkowski-Distanz
+    #[pyo3(get, set)]
+    pub tree_type: String, // "vptree" (default) oder "kdtree"
 }
 
 #[pymethods]
 impl SDOParams {
     #[new]
-    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None))]
-    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>) -> Self {
+    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None, tree_type = "vptree".to_string()))]
+    pub fn new(
+        k: usize,
+        x: usize,
+        rho: f64,
+        distance: String,
+        minkowski_p: Option<f64>,
+        tree_type: String,
+    ) -> Self {
         Self {
             k,
             x,
             rho,
             distance,
             minkowski_p,
+            tree_type,
         }
     }
 }
@@ -56,6 +82,13 @@ impl SDOParams {
             "chebyshev" => DistanceMetric::Chebyshev,
             "minkowski" => DistanceMetric::Minkowski,
             _ => DistanceMetric::Euclidean,
+        }
+    }
+
+    fn get_tree_type(&self) -> TreeType {
+        match self.tree_type.to_lowercase().as_str() {
+            "kdtree" => TreeType::KdTree,
+            _ => TreeType::VpTree, // Default: VpTree
         }
     }
 }
@@ -77,10 +110,11 @@ impl Proximity<Point> for Point {
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
+#[allow(clippy::upper_case_acronyms)]
 pub struct SDO {
     // Entferne #[pyo3(get, set)] um Konflikt mit get_active_observers() zu vermeiden
     active_observers: Vec<Vec<f64>>,
-    kdtree: Option<KdTree<Point>>,
+    tree_observers: Option<SpatialTree>,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
     #[pyo3(get, set)]
@@ -93,7 +127,7 @@ impl SDO {
     pub fn new() -> Self {
         Self {
             active_observers: Vec::new(),
-            kdtree: None,
+            tree_observers: None,
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
             x: 10,
@@ -148,13 +182,17 @@ impl SDO {
             .map(|&(idx, _)| observers[idx].clone())
             .collect();
 
-        // Baue kd-tree mit acap
+        // Baue Tree basierend auf tree_type
         let points: Vec<Point> = self
             .active_observers
             .iter()
             .map(|v| Point(v.clone()))
             .collect();
-        self.kdtree = Some(KdTree::from_iter(points));
+
+        self.tree_observers = match params.get_tree_type() {
+            TreeType::VpTree => Some(SpatialTree::Vp(VpTree::balanced(points))),
+            TreeType::KdTree => Some(SpatialTree::Kd(KdTree::from_iter(points))),
+        };
 
         Ok(())
     }
@@ -230,6 +268,26 @@ impl SDO {
 }
 
 impl SDO {
+    /// Interne Methode, um active_observers zu erhalten (für SDOclust)
+    pub(crate) fn get_active_observers_internal(&self) -> &Vec<Vec<f64>> {
+        &self.active_observers
+    }
+
+    /// Interne Methode, um x zu erhalten (für SDOclust)
+    pub(crate) fn get_x_internal(&self) -> usize {
+        self.x
+    }
+
+    /// Interne Methode, um distance_metric zu erhalten (für SDOclust)
+    pub(crate) fn get_distance_metric_internal(&self) -> DistanceMetric {
+        self.distance_metric
+    }
+
+    /// Interne Methode, um minkowski_p zu erhalten (für SDOclust)
+    pub(crate) fn get_minkowski_p_internal(&self) -> Option<f64> {
+        self.minkowski_p
+    }
+
     fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
         compute_distance(a, b, self.distance_metric, self.minkowski_p)
     }
