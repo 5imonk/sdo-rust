@@ -1,0 +1,14 @@
+[package]
+name = "sdo"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sdo"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kdtree = "0.7"
+rand = "0.8"
+pyo3 = { version = "0.21", features = ["auto-initialize", "extension-module"] }
+numpy = "0.21"
