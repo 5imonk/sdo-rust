@@ -238,6 +238,8 @@ impl SDO {
                 // Verwende Tree für k-nearest neighbors
                 self.predict_with_tree(&point_vec, tree, k)
             } else {
+                // Give a warning that the tree is not built
+                eprintln!("Warning: Tree is not built. Using brute-force instead.");
                 // Fallback: Brute-Force mit gewählter Distanzfunktion
                 let mut distances: Vec<f64> = active_observers
                     .iter()
@@ -520,6 +522,15 @@ impl SDO {
             .collect()
     }
 
+    /// Erstellt und gibt tree_active_observers zurück (für SDOclust)
+    /// Diese Funktion stellt sicher, dass der Tree erstellt ist und gibt eine Referenz zurück
+    pub(crate) fn get_tree_active_observers(
+        &self,
+    ) -> Option<std::cell::Ref<'_, Option<SpatialTree>>> {
+        self.ensure_tree_active_observers();
+        Some(self.tree_active_observers.borrow())
+    }
+
     /// Interne Methode, um x zu erhalten (für SDOclust)
     pub(crate) fn get_x_internal(&self) -> usize {
         self.x
@@ -533,6 +544,11 @@ impl SDO {
     /// Interne Methode, um minkowski_p zu erhalten (für SDOclust)
     pub(crate) fn get_minkowski_p_internal(&self) -> Option<f64> {
         self.minkowski_p
+    }
+
+    /// Interne Methode, um tree_type zu erhalten (für SDOclust)
+    pub(crate) fn get_tree_type_internal(&self) -> TreeType {
+        self.tree_type
     }
 
     fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
