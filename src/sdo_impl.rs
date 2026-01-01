@@ -1,9 +1,11 @@
 use acap::chebyshev::Chebyshev;
+use acap::distance::Distance;
 use acap::euclid::Euclidean;
 use acap::kd::KdTree;
 use acap::knn::NearestNeighbors;
 use acap::taxi::Taxicab;
 use acap::vp::VpTree;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::utils::Lp;
@@ -114,11 +116,12 @@ impl SDOParams {
 pub struct SDO {
     // Observer-Set, sortiert nach observations
     observers: ObserverSet,
-    // Aktive Observer (für schnellen Zugriff)
-    active_observers: Vec<Observer>,
     tree_observers: Option<SpatialTree>,
+    tree_active_observers: RefCell<Option<SpatialTree>>,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
+    tree_type: TreeType,
+    rho: f64,
     #[pyo3(get, set)]
     x: usize,
 }
@@ -129,10 +132,12 @@ impl SDO {
     pub fn new() -> Self {
         Self {
             observers: ObserverSet::new(),
-            active_observers: Vec::new(),
             tree_observers: None,
+            tree_active_observers: RefCell::new(None),
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
+            tree_type: TreeType::VpTree,
+            rho: 0.1,
             x: 10,
         }
     }
@@ -155,6 +160,10 @@ impl SDO {
         self.x = params.x;
         self.distance_metric = params.get_metric();
         self.minkowski_p = params.minkowski_p;
+        self.tree_type = params.get_tree_type();
+        self.rho = params.rho;
+        // Reset tree_active_observers, da sich die Parameter geändert haben
+        *self.tree_active_observers.borrow_mut() = None;
 
         // Schritt 1: Sample
         let mut rng = thread_rng();
@@ -188,26 +197,12 @@ impl SDO {
             self.observers.insert(observer);
         }
 
-        // Schritt 5: Clean model - extrahiere aktive Observer
-        let num_active = ((observers_data.len() as f64) * (1.0 - params.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(observers_data.len());
-        self.active_observers = self.observers.get_active(num_active);
-
-        // Aktualisiere Indices der aktiven Observer
-        for (new_idx, observer) in self.active_observers.iter_mut().enumerate() {
-            observer.index = new_idx;
-        }
-
-        // Baue Tree neu mit aktiven Observers
-        self.tree_observers =
-            self.build_tree_from_observers(&self.active_observers, metric, minkowski_p, tree_type);
-
         Ok(())
     }
 
     /// Berechnet den Outlier-Score für einen Datenpunkt
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        if self.active_observers.is_empty() {
+        if self.observers.is_empty() {
             return Ok(f64::INFINITY);
         }
 
@@ -222,30 +217,46 @@ impl SDO {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        let k = self.x.min(self.active_observers.len());
+        // Lazy: Berechne aktive Observer nur wenn nötig
+        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
+        let num_active = num_active.max(1).min(self.observers.len());
+        let active_observers = self.observers.get_active(num_active);
 
-        // Verwende Brute-Force mit gewählter Distanzfunktion
-        // (kd-tree wird für andere Metriken als Euclidean nicht optimal genutzt)
-        let mut distances: Vec<f64> = self
-            .active_observers
-            .iter()
-            .map(|observer| self.compute_distance(&point_vec, &observer.data))
-            .collect();
-
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let k_actual = k.min(distances.len());
-        let relevant_distances: Vec<f64> = distances.into_iter().take(k_actual).collect();
-
-        if relevant_distances.is_empty() {
+        if active_observers.is_empty() {
             return Ok(f64::INFINITY);
         }
 
-        let mid = relevant_distances.len() / 2;
-        let median = if relevant_distances.len().is_multiple_of(2) && mid > 0 {
-            (relevant_distances[mid - 1] + relevant_distances[mid]) / 2.0
+        let k = self.x.min(active_observers.len());
+
+        // Versuche Tree-basierte Nearest Neighbor Search zu verwenden
+        // Erstelle tree_active_observers lazy, wenn noch nicht vorhanden
+        self.ensure_tree_active_observers();
+
+        let distances = {
+            let tree_opt = self.tree_active_observers.borrow();
+            if let Some(ref tree) = *tree_opt {
+                // Verwende Tree für k-nearest neighbors
+                self.predict_with_tree(&point_vec, tree, k)
+            } else {
+                // Fallback: Brute-Force mit gewählter Distanzfunktion
+                let mut distances: Vec<f64> = active_observers
+                    .iter()
+                    .map(|observer| self.compute_distance(&point_vec, &observer.data))
+                    .collect();
+                distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                distances.into_iter().take(k).collect()
+            }
+        };
+
+        if distances.is_empty() {
+            return Ok(f64::INFINITY);
+        }
+
+        let mid = distances.len() / 2;
+        let median = if distances.len().is_multiple_of(2) && mid > 0 {
+            (distances[mid - 1] + distances[mid]) / 2.0
         } else {
-            relevant_distances[mid]
+            distances[mid]
         };
 
         Ok(median)
@@ -253,18 +264,22 @@ impl SDO {
 
     /// Konvertiert active_observers zu NumPy-Array für Python
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
-        if self.active_observers.is_empty() {
+        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
+        let num_active = num_active.max(1).min(self.observers.len());
+        let active_observers = self.observers.get_active(num_active);
+
+        if active_observers.is_empty() {
             let array = PyArray2::zeros_bound(py, (0, 0), false);
             return Ok(array.unbind());
         }
 
-        let rows = self.active_observers.len();
-        let cols = self.active_observers[0].data.len();
+        let rows = active_observers.len();
+        let cols = active_observers[0].data.len();
         let array = PyArray2::zeros_bound(py, (rows, cols), false);
 
         unsafe {
             let mut array_mut = array.as_array_mut();
-            for (i, observer) in self.active_observers.iter().enumerate() {
+            for (i, observer) in active_observers.iter().enumerate() {
                 for (j, &value) in observer.data.iter().enumerate() {
                     array_mut[[i, j]] = value;
                 }
@@ -414,9 +429,92 @@ impl SDO {
 }
 
 impl SDO {
+    /// Erstellt tree_active_observers lazy, wenn noch nicht vorhanden
+    fn ensure_tree_active_observers(&self) {
+        if self.tree_active_observers.borrow().is_none() {
+            let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
+            let num_active = num_active.max(1).min(self.observers.len());
+            let active_observers = self.observers.get_active(num_active);
+            *self.tree_active_observers.borrow_mut() = self.build_tree_from_observers(
+                &active_observers,
+                self.distance_metric,
+                self.minkowski_p,
+                self.tree_type,
+            );
+        }
+    }
+
+    /// Verwendet Tree für k-nearest neighbors und gibt Distanzen zurück
+    fn predict_with_tree(&self, point: &[f64], tree: &SpatialTree, k: usize) -> Vec<f64> {
+        let point_arc = ArcVec(Arc::new(point.to_vec()));
+        match tree {
+            SpatialTree::VpEuclidean(ref t) => {
+                let query = Euclidean(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance.value())
+                    .collect()
+            }
+            SpatialTree::VpManhattan(ref t) => {
+                let query = Taxicab(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+            SpatialTree::VpChebyshev(ref t) => {
+                let query = Chebyshev(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+            SpatialTree::VpMinkowski(ref t) => {
+                let p = self.minkowski_p.unwrap_or(3.0);
+                let query = Lp::new(point_arc.clone(), p);
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+            SpatialTree::KdEuclidean(ref t) => {
+                let query = Euclidean(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance.value())
+                    .collect()
+            }
+            SpatialTree::KdManhattan(ref t) => {
+                let query = Taxicab(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+            SpatialTree::KdChebyshev(ref t) => {
+                let query = Chebyshev(point_arc.clone());
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+            SpatialTree::KdMinkowski(ref t) => {
+                let p = self.minkowski_p.unwrap_or(3.0);
+                let query = Lp::new(point_arc.clone(), p);
+                t.k_nearest(&query, k)
+                    .into_iter()
+                    .map(|neighbor| neighbor.distance)
+                    .collect()
+            }
+        }
+    }
+
     /// Interne Methode, um active_observers zu erhalten (für SDOclust)
     pub(crate) fn get_active_observers_internal(&self) -> Vec<Vec<f64>> {
-        self.active_observers
+        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
+        let num_active = num_active.max(1).min(self.observers.len());
+        self.observers
+            .get_active(num_active)
             .iter()
             .map(|obs| obs.data.clone())
             .collect()
