@@ -7,9 +7,10 @@ use numpy::{PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::f64;
+use std::sync::Arc;
 
 use crate::sdo_impl::{DistanceMetric, SDOParams, SpatialTree, TreeType, SDO};
-use crate::utils::{compute_distance, Minkowski};
+use crate::utils::{compute_distance, ArcVec, Lp};
 
 /// Union-Find Datenstruktur für Connected Components
 struct UnionFind {
@@ -202,63 +203,63 @@ impl SDOclust {
             .map(|(_, data)| data.clone())
             .collect();
 
-        // Baue Tree mit entsprechenden Metrik-Wrappern
+        // Baue Tree mit entsprechenden Metrik-Wrappern (verwendet ArcVec für Referenzen)
         self.tree_active = match (tree_type, metric) {
             (TreeType::VpTree, DistanceMetric::Euclidean) => {
-                let points: Vec<Euclidean<Vec<f64>>> = valid_observers
+                let points: Vec<Euclidean<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Euclidean(data.clone()))
+                    .map(|data| Euclidean(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::VpEuclidean(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Manhattan) => {
-                let points: Vec<Taxicab<Vec<f64>>> = valid_observers
+                let points: Vec<Taxicab<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Taxicab(data.clone()))
+                    .map(|data| Taxicab(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::VpManhattan(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Chebyshev) => {
-                let points: Vec<Chebyshev<Vec<f64>>> = valid_observers
+                let points: Vec<Chebyshev<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Chebyshev(data.clone()))
+                    .map(|data| Chebyshev(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::VpChebyshev(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Minkowski) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let points: Vec<Minkowski> = valid_observers
+                let points: Vec<Lp> = valid_observers
                     .iter()
-                    .map(|data| Minkowski::new(data.clone(), p))
+                    .map(|data| Lp::new(ArcVec(Arc::new(data.clone())), p))
                     .collect();
                 Some(SpatialTree::VpMinkowski(VpTree::balanced(points)))
             }
             (TreeType::KdTree, DistanceMetric::Euclidean) => {
-                let points: Vec<Euclidean<Vec<f64>>> = valid_observers
+                let points: Vec<Euclidean<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Euclidean(data.clone()))
+                    .map(|data| Euclidean(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::KdEuclidean(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Manhattan) => {
-                let points: Vec<Taxicab<Vec<f64>>> = valid_observers
+                let points: Vec<Taxicab<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Taxicab(data.clone()))
+                    .map(|data| Taxicab(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::KdManhattan(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Chebyshev) => {
-                let points: Vec<Chebyshev<Vec<f64>>> = valid_observers
+                let points: Vec<Chebyshev<ArcVec>> = valid_observers
                     .iter()
-                    .map(|data| Chebyshev(data.clone()))
+                    .map(|data| Chebyshev(ArcVec(Arc::new(data.clone()))))
                     .collect();
                 Some(SpatialTree::KdChebyshev(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Minkowski) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let points: Vec<Minkowski> = valid_observers
+                let points: Vec<Lp> = valid_observers
                     .iter()
-                    .map(|data| Minkowski::new(data.clone(), p))
+                    .map(|data| Lp::new(ArcVec(Arc::new(data.clone())), p))
                     .collect();
                 Some(SpatialTree::KdMinkowski(KdTree::from_iter(points)))
             }
