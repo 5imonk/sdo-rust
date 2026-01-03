@@ -15,7 +15,10 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::f64;
 
-use crate::utils::{compute_distance, Observer, ObserverSet};
+use crate::utils::{
+    compute_distance, Observer, ObserverChebyshev, ObserverEuclidean, ObserverManhattan,
+    ObserverMinkowski, ObserverSet,
+};
 
 /// Distanzfunktion für SDO
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +52,20 @@ pub(crate) enum SpatialTree {
     KdManhattan(KdTree<Taxicab<ArcVec>>),
     KdChebyshev(KdTree<Chebyshev<ArcVec>>),
     KdMinkowski(KdTree<Lp>),
+}
+
+/// Enum für Trees, die direkt auf Observer-Objekten arbeiten
+/// Ermöglicht direkten Zugriff auf Observer-Index ohne Suche
+#[allow(dead_code)]
+pub(crate) enum SpatialTreeObserver {
+    VpEuclidean(VpTree<ObserverEuclidean>),
+    VpManhattan(VpTree<ObserverManhattan>),
+    VpChebyshev(VpTree<ObserverChebyshev>),
+    VpMinkowski(VpTree<ObserverMinkowski>),
+    KdEuclidean(KdTree<ObserverEuclidean>),
+    KdManhattan(KdTree<ObserverManhattan>),
+    KdChebyshev(KdTree<ObserverChebyshev>),
+    KdMinkowski(KdTree<ObserverMinkowski>),
 }
 
 /// Parameter-Struktur für SDO
@@ -117,7 +134,7 @@ pub struct SDO {
     // Observer-Set, sortiert nach observations
     observers: ObserverSet,
     tree_observers: Option<SpatialTree>,
-    tree_active_observers: RefCell<Option<SpatialTree>>,
+    tree_active_observers: RefCell<Option<SpatialTreeObserver>>,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
     tree_type: TreeType,
@@ -235,8 +252,8 @@ impl SDO {
         let distances = {
             let tree_opt = self.tree_active_observers.borrow();
             if let Some(ref tree) = *tree_opt {
-                // Verwende Tree für k-nearest neighbors
-                self.predict_with_tree(&point_vec, tree, k)
+                // Verwende Tree für k-nearest neighbors (SpatialTreeObserver)
+                self.predict_with_tree_observer(&point_vec, tree, k)
             } else {
                 // Give a warning that the tree is not built
                 eprintln!("Warning: Tree is not built. Using brute-force instead.");
@@ -364,16 +381,84 @@ impl SDO {
         }
     }
 
-    /// Baut einen Tree aus Observer-Objekten
+    /// Baut einen Tree aus Observer-Objekten (mit Index-Information)
     fn build_tree_from_observers(
         &self,
         observers: &[Observer],
         metric: DistanceMetric,
         minkowski_p: Option<f64>,
         tree_type: TreeType,
-    ) -> Option<SpatialTree> {
-        let observers_data: Vec<Vec<f64>> = observers.iter().map(|obs| obs.data.clone()).collect();
-        self.build_tree(&observers_data, metric, minkowski_p, tree_type)
+    ) -> Option<SpatialTreeObserver> {
+        if observers.is_empty() {
+            return None;
+        }
+
+        match (tree_type, metric) {
+            (TreeType::VpTree, DistanceMetric::Euclidean) => {
+                let points: Vec<ObserverEuclidean> = observers
+                    .iter()
+                    .map(|obs| ObserverEuclidean(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::VpEuclidean(VpTree::balanced(points)))
+            }
+            (TreeType::VpTree, DistanceMetric::Manhattan) => {
+                let points: Vec<ObserverManhattan> = observers
+                    .iter()
+                    .map(|obs| ObserverManhattan(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::VpManhattan(VpTree::balanced(points)))
+            }
+            (TreeType::VpTree, DistanceMetric::Chebyshev) => {
+                let points: Vec<ObserverChebyshev> = observers
+                    .iter()
+                    .map(|obs| ObserverChebyshev(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::VpChebyshev(VpTree::balanced(points)))
+            }
+            (TreeType::VpTree, DistanceMetric::Minkowski) => {
+                let p = minkowski_p.unwrap_or(3.0);
+                let points: Vec<ObserverMinkowski> = observers
+                    .iter()
+                    .map(|obs| ObserverMinkowski {
+                        observer: obs.clone(),
+                        p,
+                    })
+                    .collect();
+                Some(SpatialTreeObserver::VpMinkowski(VpTree::balanced(points)))
+            }
+            (TreeType::KdTree, DistanceMetric::Euclidean) => {
+                let points: Vec<ObserverEuclidean> = observers
+                    .iter()
+                    .map(|obs| ObserverEuclidean(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::KdEuclidean(KdTree::from_iter(points)))
+            }
+            (TreeType::KdTree, DistanceMetric::Manhattan) => {
+                let points: Vec<ObserverManhattan> = observers
+                    .iter()
+                    .map(|obs| ObserverManhattan(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::KdManhattan(KdTree::from_iter(points)))
+            }
+            (TreeType::KdTree, DistanceMetric::Chebyshev) => {
+                let points: Vec<ObserverChebyshev> = observers
+                    .iter()
+                    .map(|obs| ObserverChebyshev(obs.clone()))
+                    .collect();
+                Some(SpatialTreeObserver::KdChebyshev(KdTree::from_iter(points)))
+            }
+            (TreeType::KdTree, DistanceMetric::Minkowski) => {
+                let p = minkowski_p.unwrap_or(3.0);
+                let points: Vec<ObserverMinkowski> = observers
+                    .iter()
+                    .map(|obs| ObserverMinkowski {
+                        observer: obs.clone(),
+                        p,
+                    })
+                    .collect();
+                Some(SpatialTreeObserver::KdMinkowski(KdTree::from_iter(points)))
+            }
+        }
     }
 
     /// Zählt Punkte in der Nachbarschaft mit Tree-basierter Nearest Neighbor Search
@@ -446,63 +531,78 @@ impl SDO {
         }
     }
 
-    /// Verwendet Tree für k-nearest neighbors und gibt Distanzen zurück
-    fn predict_with_tree(&self, point: &[f64], tree: &SpatialTree, k: usize) -> Vec<f64> {
-        let point_arc = ArcVec(Arc::new(point.to_vec()));
+    /// Verwendet Tree für k-nearest neighbors und gibt Distanzen zurück (für SpatialTreeObserver)
+    fn predict_with_tree_observer(
+        &self,
+        point: &[f64],
+        tree: &SpatialTreeObserver,
+        k: usize,
+    ) -> Vec<f64> {
+        let point_observer = Observer {
+            data: point.to_vec(),
+            observations: 0.0,
+            index: 0,
+        };
         match tree {
-            SpatialTree::VpEuclidean(ref t) => {
-                let query = Euclidean(point_arc.clone());
+            SpatialTreeObserver::VpEuclidean(ref t) => {
+                let query = ObserverEuclidean(point_observer);
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance.value())
                     .collect()
             }
-            SpatialTree::VpManhattan(ref t) => {
-                let query = Taxicab(point_arc.clone());
+            SpatialTreeObserver::VpManhattan(ref t) => {
+                let query = ObserverManhattan(point_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect()
             }
-            SpatialTree::VpChebyshev(ref t) => {
-                let query = Chebyshev(point_arc.clone());
+            SpatialTreeObserver::VpChebyshev(ref t) => {
+                let query = ObserverChebyshev(point_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect()
             }
-            SpatialTree::VpMinkowski(ref t) => {
+            SpatialTreeObserver::VpMinkowski(ref t) => {
                 let p = self.minkowski_p.unwrap_or(3.0);
-                let query = Lp::new(point_arc.clone(), p);
+                let query = ObserverMinkowski {
+                    observer: point_observer.clone(),
+                    p,
+                };
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect()
             }
-            SpatialTree::KdEuclidean(ref t) => {
-                let query = Euclidean(point_arc.clone());
+            SpatialTreeObserver::KdEuclidean(ref t) => {
+                let query = ObserverEuclidean(point_observer);
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance.value())
                     .collect()
             }
-            SpatialTree::KdManhattan(ref t) => {
-                let query = Taxicab(point_arc.clone());
+            SpatialTreeObserver::KdManhattan(ref t) => {
+                let query = ObserverManhattan(point_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect()
             }
-            SpatialTree::KdChebyshev(ref t) => {
-                let query = Chebyshev(point_arc.clone());
+            SpatialTreeObserver::KdChebyshev(ref t) => {
+                let query = ObserverChebyshev(point_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect()
             }
-            SpatialTree::KdMinkowski(ref t) => {
+            SpatialTreeObserver::KdMinkowski(ref t) => {
                 let p = self.minkowski_p.unwrap_or(3.0);
-                let query = Lp::new(point_arc.clone(), p);
+                let query = ObserverMinkowski {
+                    observer: point_observer.clone(),
+                    p,
+                };
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
@@ -522,11 +622,28 @@ impl SDO {
             .collect()
     }
 
+    /// Interne Methode, um active_observers mit Indizes zu erhalten (für SDOclust)
+    /// Gibt Observer-Objekte zurück, wobei index die Position in der active_observers Liste ist
+    pub(crate) fn get_active_observers_with_indices(&self) -> Vec<Observer> {
+        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
+        let num_active = num_active.max(1).min(self.observers.len());
+        self.observers
+            .get_active(num_active)
+            .iter()
+            .enumerate()
+            .map(|(idx, obs)| Observer {
+                data: obs.data.clone(),
+                observations: obs.observations,
+                index: idx, // Index in active_observers Liste
+            })
+            .collect()
+    }
+
     /// Erstellt und gibt tree_active_observers zurück (für SDOclust)
     /// Diese Funktion stellt sicher, dass der Tree erstellt ist und gibt eine Referenz zurück
     pub(crate) fn get_tree_active_observers(
         &self,
-    ) -> Option<std::cell::Ref<'_, Option<SpatialTree>>> {
+    ) -> Option<std::cell::Ref<'_, Option<SpatialTreeObserver>>> {
         self.ensure_tree_active_observers();
         Some(self.tree_active_observers.borrow())
     }

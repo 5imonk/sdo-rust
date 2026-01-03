@@ -1,71 +1,17 @@
-use acap::chebyshev::Chebyshev;
 use acap::distance::Distance;
-use acap::euclid::Euclidean;
 use acap::kd::KdTree;
 use acap::knn::NearestNeighbors;
-use acap::taxi::Taxicab;
 use acap::vp::VpTree;
 use numpy::{PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::f64;
-use std::sync::Arc;
 
-use crate::sdo_impl::{DistanceMetric, SDOParams, SpatialTree, TreeType, SDO};
-use crate::utils::{compute_distance, ArcVec, Lp};
-
-/// Union-Find Datenstruktur für Connected Components
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x {
-            self.parent[x] = self.find(self.parent[x]);
-        }
-        self.parent[x]
-    }
-
-    fn union(&mut self, x: usize, y: usize) {
-        let root_x = self.find(x);
-        let root_y = self.find(y);
-
-        if root_x != root_y {
-            if self.rank[root_x] < self.rank[root_y] {
-                self.parent[root_x] = root_y;
-            } else if self.rank[root_x] > self.rank[root_y] {
-                self.parent[root_y] = root_x;
-            } else {
-                self.parent[root_y] = root_x;
-                self.rank[root_x] += 1;
-            }
-        }
-    }
-
-    fn get_components(&mut self, n: usize) -> Vec<Vec<usize>> {
-        // Normalisiere alle Pfade
-        for i in 0..n {
-            self.find(i);
-        }
-
-        // Gruppiere nach Root
-        let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            components.entry(self.parent[i]).or_default().push(i);
-        }
-
-        components.into_values().collect()
-    }
-}
+use crate::sdo_impl::{DistanceMetric, SDOParams, SpatialTreeObserver, TreeType, SDO};
+use crate::utils::{
+    compute_distance, Observer, ObserverChebyshev, ObserverEuclidean, ObserverManhattan,
+    ObserverMinkowski,
+};
 
 /// Parameter-Struktur für SDOclust
 #[pyclass]
@@ -125,7 +71,7 @@ impl SDOclustParams {
 #[pyclass]
 pub struct SDOclust {
     sdo: SDO, // Internes SDO-Objekt für Modell-Erstellung
-    tree_active: std::cell::RefCell<Option<SpatialTree>>,
+    tree_active: std::cell::RefCell<Option<SpatialTreeObserver>>,
     observer_labels: std::cell::RefCell<Vec<i32>>, // Label für jeden Observer (-1 = entfernt, lazy berechnet)
     #[pyo3(get, set)]
     chi: usize,               // χ - Anzahl der nächsten Observer für lokale Thresholds
@@ -271,15 +217,14 @@ impl SDOclust {
             return; // Bereits gebaut
         }
 
-        let active_observers = self.sdo.get_active_observers_internal();
+        let active_observers = self.sdo.get_active_observers_with_indices();
         let observer_labels = self.observer_labels.borrow();
 
-        // Filtere Observer mit gültigen Labels
-        let valid_observers: Vec<Vec<f64>> = active_observers
+        // Filtere Observer mit gültigen Labels und behalte Index
+        let valid_observers: Vec<Observer> = active_observers
             .iter()
-            .enumerate()
-            .filter(|(idx, _)| *idx < observer_labels.len() && observer_labels[*idx] >= 0)
-            .map(|(_, data)| data.clone())
+            .filter(|obs| obs.index < observer_labels.len() && observer_labels[obs.index] >= 0)
+            .cloned()
             .collect();
 
         if valid_observers.is_empty() {
@@ -291,65 +236,53 @@ impl SDOclust {
         let minkowski_p = self.sdo.get_minkowski_p_internal();
         let tree_type = self.sdo.get_tree_type_internal();
 
-        // Baue Tree mit entsprechenden Metrik-Wrappern (verwendet ArcVec für Referenzen)
+        // Baue Tree mit Observer-Objekten (direkt mit Index-Information)
         *self.tree_active.borrow_mut() = match (tree_type, metric) {
             (TreeType::VpTree, DistanceMetric::Euclidean) => {
-                let points: Vec<Euclidean<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Euclidean(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::VpEuclidean(VpTree::balanced(points)))
+                let points: Vec<ObserverEuclidean> =
+                    valid_observers.into_iter().map(ObserverEuclidean).collect();
+                Some(SpatialTreeObserver::VpEuclidean(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Manhattan) => {
-                let points: Vec<Taxicab<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Taxicab(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::VpManhattan(VpTree::balanced(points)))
+                let points: Vec<ObserverManhattan> =
+                    valid_observers.into_iter().map(ObserverManhattan).collect();
+                Some(SpatialTreeObserver::VpManhattan(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Chebyshev) => {
-                let points: Vec<Chebyshev<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Chebyshev(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::VpChebyshev(VpTree::balanced(points)))
+                let points: Vec<ObserverChebyshev> =
+                    valid_observers.into_iter().map(ObserverChebyshev).collect();
+                Some(SpatialTreeObserver::VpChebyshev(VpTree::balanced(points)))
             }
             (TreeType::VpTree, DistanceMetric::Minkowski) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let points: Vec<Lp> = valid_observers
-                    .iter()
-                    .map(|data| Lp::new(ArcVec(Arc::new(data.clone())), p))
+                let points: Vec<ObserverMinkowski> = valid_observers
+                    .into_iter()
+                    .map(|obs| ObserverMinkowski { observer: obs, p })
                     .collect();
-                Some(SpatialTree::VpMinkowski(VpTree::balanced(points)))
+                Some(SpatialTreeObserver::VpMinkowski(VpTree::balanced(points)))
             }
             (TreeType::KdTree, DistanceMetric::Euclidean) => {
-                let points: Vec<Euclidean<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Euclidean(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::KdEuclidean(KdTree::from_iter(points)))
+                let points: Vec<ObserverEuclidean> =
+                    valid_observers.into_iter().map(ObserverEuclidean).collect();
+                Some(SpatialTreeObserver::KdEuclidean(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Manhattan) => {
-                let points: Vec<Taxicab<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Taxicab(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::KdManhattan(KdTree::from_iter(points)))
+                let points: Vec<ObserverManhattan> =
+                    valid_observers.into_iter().map(ObserverManhattan).collect();
+                Some(SpatialTreeObserver::KdManhattan(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Chebyshev) => {
-                let points: Vec<Chebyshev<ArcVec>> = valid_observers
-                    .iter()
-                    .map(|data| Chebyshev(ArcVec(Arc::new(data.clone()))))
-                    .collect();
-                Some(SpatialTree::KdChebyshev(KdTree::from_iter(points)))
+                let points: Vec<ObserverChebyshev> =
+                    valid_observers.into_iter().map(ObserverChebyshev).collect();
+                Some(SpatialTreeObserver::KdChebyshev(KdTree::from_iter(points)))
             }
             (TreeType::KdTree, DistanceMetric::Minkowski) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let points: Vec<Lp> = valid_observers
-                    .iter()
-                    .map(|data| Lp::new(ArcVec(Arc::new(data.clone())), p))
+                let points: Vec<ObserverMinkowski> = valid_observers
+                    .into_iter()
+                    .map(|obs| ObserverMinkowski { observer: obs, p })
                     .collect();
-                Some(SpatialTree::KdMinkowski(KdTree::from_iter(points)))
+                Some(SpatialTreeObserver::KdMinkowski(KdTree::from_iter(points)))
             }
         };
     }
@@ -402,29 +335,43 @@ impl SDOclust {
             .map(|&h_omega| self.zeta * h_omega + (1.0 - self.zeta) * global_threshold)
             .collect();
 
-        // Schritt 4: Baue Graph - zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
-        let mut uf = UnionFind::new(n);
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dist = compute_distance(
-                    &active_observers[i],
-                    &active_observers[j],
-                    distance_metric,
-                    minkowski_p,
-                );
-                if dist < final_thresholds[i] && dist < final_thresholds[j] {
-                    uf.union(i, j);
-                }
-            }
-        }
-
-        // Schritt 5: Weise Labels zu
-        let components = uf.get_components(n);
+        // Schritt 4 & 5: Finde Connected Components mit DFS und weise Labels zu
+        // Zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
         let mut observer_labels = vec![-1; n]; // -1 = kein Label/entfernt
+        let mut visited = vec![false; n];
+        let mut current_label = 0;
 
-        for (label, component) in components.iter().enumerate() {
-            for &observer_idx in component {
-                observer_labels[observer_idx] = label as i32;
+        // DFS für jeden unbesuchten Observer
+        for start_idx in 0..n {
+            if !visited[start_idx] {
+                // Starte DFS von diesem Observer
+                let mut stack = vec![start_idx];
+                visited[start_idx] = true;
+                observer_labels[start_idx] = current_label;
+
+                while let Some(current_idx) = stack.pop() {
+                    // Finde alle verbundenen Nachbarn
+                    for neighbor_idx in 0..n {
+                        if neighbor_idx != current_idx && !visited[neighbor_idx] {
+                            // Berechne Distanz nur wenn nötig
+                            let dist = compute_distance(
+                                &active_observers[current_idx],
+                                &active_observers[neighbor_idx],
+                                distance_metric,
+                                minkowski_p,
+                            );
+                            // Zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
+                            if dist < final_thresholds[current_idx]
+                                && dist < final_thresholds[neighbor_idx]
+                            {
+                                visited[neighbor_idx] = true;
+                                observer_labels[neighbor_idx] = current_label;
+                                stack.push(neighbor_idx);
+                            }
+                        }
+                    }
+                }
+                current_label += 1;
             }
         }
         *self.observer_labels.borrow_mut() = observer_labels;
@@ -459,64 +406,81 @@ impl SDOclust {
     }
 
     /// Holt k-nearest distances vom Tree für einen Observer
-    fn get_k_nearest_distances(&self, observer: &[f64], tree: &SpatialTree, k: usize) -> Vec<f64> {
-        let observer_arc = ArcVec(Arc::new(observer.to_vec()));
+    fn get_k_nearest_distances(
+        &self,
+        observer: &[f64],
+        tree: &SpatialTreeObserver,
+        k: usize,
+    ) -> Vec<f64> {
         let minkowski_p = self.sdo.get_minkowski_p_internal();
 
+        // Erstelle Query-Punkt als Observer
+        let query_observer = Observer {
+            data: observer.to_vec(),
+            observations: 0.0,
+            index: 0,
+        };
+
         let neighbors = match tree {
-            SpatialTree::VpEuclidean(ref t) => {
-                let query = Euclidean(observer_arc.clone());
+            SpatialTreeObserver::VpEuclidean(ref t) => {
+                let query = ObserverEuclidean(query_observer);
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance.value())
                     .collect::<Vec<_>>()
             }
-            SpatialTree::VpManhattan(ref t) => {
-                let query = Taxicab(observer_arc.clone());
+            SpatialTreeObserver::VpManhattan(ref t) => {
+                let query = ObserverManhattan(query_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect::<Vec<_>>()
             }
-            SpatialTree::VpChebyshev(ref t) => {
-                let query = Chebyshev(observer_arc.clone());
+            SpatialTreeObserver::VpChebyshev(ref t) => {
+                let query = ObserverChebyshev(query_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect::<Vec<_>>()
             }
-            SpatialTree::VpMinkowski(ref t) => {
+            SpatialTreeObserver::VpMinkowski(ref t) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let query = Lp::new(observer_arc.clone(), p);
+                let query = ObserverMinkowski {
+                    observer: query_observer.clone(),
+                    p,
+                };
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect::<Vec<_>>()
             }
-            SpatialTree::KdEuclidean(ref t) => {
-                let query = Euclidean(observer_arc.clone());
+            SpatialTreeObserver::KdEuclidean(ref t) => {
+                let query = ObserverEuclidean(query_observer);
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance.value())
                     .collect::<Vec<_>>()
             }
-            SpatialTree::KdManhattan(ref t) => {
-                let query = Taxicab(observer_arc.clone());
+            SpatialTreeObserver::KdManhattan(ref t) => {
+                let query = ObserverManhattan(query_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect::<Vec<_>>()
             }
-            SpatialTree::KdChebyshev(ref t) => {
-                let query = Chebyshev(observer_arc.clone());
+            SpatialTreeObserver::KdChebyshev(ref t) => {
+                let query = ObserverChebyshev(query_observer.clone());
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
                     .collect::<Vec<_>>()
             }
-            SpatialTree::KdMinkowski(ref t) => {
+            SpatialTreeObserver::KdMinkowski(ref t) => {
                 let p = minkowski_p.unwrap_or(3.0);
-                let query = Lp::new(observer_arc.clone(), p);
+                let query = ObserverMinkowski {
+                    observer: query_observer.clone(),
+                    p,
+                };
                 t.k_nearest(&query, k)
                     .into_iter()
                     .map(|neighbor| neighbor.distance)
@@ -549,12 +513,135 @@ impl SDOclust {
     }
 
     /// Verwendet Tree für k-nearest neighbors und gibt das häufigste Label zurück
-    #[allow(unused_variables)]
-    fn predict_with_tree(&self, point: &[f64], _tree: &SpatialTree) -> i32 {
-        // Für jetzt verwenden wir Brute-Force, da das Index-Mapping komplex ist
-        // TODO: Implementiere Index-Mapping für Tree-basierte Prediction
-        let active_observers = self.sdo.get_active_observers_internal();
-        self.predict_brute_force(point, &active_observers)
+    fn predict_with_tree(&self, point: &[f64], tree: &SpatialTreeObserver) -> i32 {
+        let observer_labels = self.observer_labels.borrow();
+        let x = self.sdo.get_x_internal();
+        let minkowski_p = self.sdo.get_minkowski_p_internal();
+
+        // Erstelle Query-Punkt (als Observer-Wrapper)
+        let point_observer = Observer {
+            data: point.to_vec(),
+            observations: 0.0,
+            index: 0,
+        };
+
+        let mut label_counts: HashMap<i32, usize> = HashMap::new();
+        let k = x.min(observer_labels.len());
+
+        // Hole k-nearest neighbors vom Tree - direkt als Observer-Objekte!
+        match tree {
+            SpatialTreeObserver::VpEuclidean(ref t) => {
+                let query = ObserverEuclidean(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index; // Direkter Zugriff auf Index!
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::KdEuclidean(ref t) => {
+                let query = ObserverEuclidean(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::VpManhattan(ref t) => {
+                let query = ObserverManhattan(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::KdManhattan(ref t) => {
+                let query = ObserverManhattan(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::VpChebyshev(ref t) => {
+                let query = ObserverChebyshev(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::KdChebyshev(ref t) => {
+                let query = ObserverChebyshev(point_observer);
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.0.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::VpMinkowski(ref t) => {
+                let p = minkowski_p.unwrap_or(3.0);
+                let query = ObserverMinkowski {
+                    observer: point_observer,
+                    p,
+                };
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.observer.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            SpatialTreeObserver::KdMinkowski(ref t) => {
+                let p = minkowski_p.unwrap_or(3.0);
+                let query = ObserverMinkowski {
+                    observer: point_observer,
+                    p,
+                };
+                for neighbor in t.k_nearest(&query, k) {
+                    let idx = neighbor.item.observer.index;
+                    if idx < observer_labels.len() {
+                        let label = observer_labels[idx];
+                        if label >= 0 {
+                            *label_counts.entry(label).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Gib das häufigste Label zurück
+        if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
+            most_common_label
+        } else {
+            -1
+        }
     }
 
     fn predict_brute_force(&self, point: &[f64], active_observers: &[Vec<f64>]) -> i32 {

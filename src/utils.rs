@@ -1,7 +1,7 @@
 use acap::chebyshev::chebyshev_distance;
 use acap::coords::Coordinates;
 use acap::distance::{Distance, Proximity};
-use acap::euclid::euclidean_distance;
+use acap::euclid::{euclidean_distance, EuclideanDistance};
 use acap::lp::lp_distance;
 use acap::taxi::taxicab_distance;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Verwendet lp_distance aus acap
 #[derive(Clone, Debug)]
 pub struct Lp {
-    data: ArcVec,
+    pub data: ArcVec,
     p: f64,
 }
 
@@ -257,5 +257,100 @@ pub fn compute_distance(
             let p = minkowski_p.unwrap_or(3.0);
             compute_minkowski_distance(a, b, p)
         }
+    }
+}
+
+/// Observer-Wrapper für verschiedene Metriken (für Tree-basierte Suche)
+/// Diese Wrapper ermöglichen es, Observer direkt in Trees zu speichern
+/// und bei k-NN-Suchen direkt die Observer-Objekte zurückzubekommen
+
+#[derive(Clone, Debug)]
+pub struct ObserverEuclidean(pub Observer);
+
+#[derive(Clone, Debug)]
+pub struct ObserverManhattan(pub Observer);
+
+#[derive(Clone, Debug)]
+pub struct ObserverChebyshev(pub Observer);
+
+#[derive(Clone, Debug)]
+pub struct ObserverMinkowski {
+    pub observer: Observer,
+    pub p: f64,
+}
+
+// Implementiere Coordinates für ObserverEuclidean
+impl Coordinates for ObserverEuclidean {
+    type Value = f64;
+    fn dims(&self) -> usize {
+        self.0.data.len()
+    }
+    fn coord(&self, i: usize) -> Self::Value {
+        self.0.data[i]
+    }
+}
+
+// Implementiere Proximity für ObserverEuclidean
+impl Proximity for ObserverEuclidean {
+    type Distance = EuclideanDistance<f64>;
+    fn distance(&self, other: &Self) -> Self::Distance {
+        euclidean_distance(self, other)
+    }
+}
+
+// Implementiere Coordinates für ObserverManhattan
+impl Coordinates for ObserverManhattan {
+    type Value = f64;
+    fn dims(&self) -> usize {
+        self.0.data.len()
+    }
+    fn coord(&self, i: usize) -> Self::Value {
+        self.0.data[i]
+    }
+}
+
+// Implementiere Proximity für ObserverManhattan
+impl Proximity for ObserverManhattan {
+    type Distance = f64;
+    fn distance(&self, other: &Self) -> Self::Distance {
+        taxicab_distance(self, other)
+    }
+}
+
+// Implementiere Coordinates für ObserverChebyshev
+impl Coordinates for ObserverChebyshev {
+    type Value = f64;
+    fn dims(&self) -> usize {
+        self.0.data.len()
+    }
+    fn coord(&self, i: usize) -> Self::Value {
+        self.0.data[i]
+    }
+}
+
+// Implementiere Proximity für ObserverChebyshev
+impl Proximity for ObserverChebyshev {
+    type Distance = f64;
+    fn distance(&self, other: &Self) -> Self::Distance {
+        chebyshev_distance(self, other)
+    }
+}
+
+// Implementiere Coordinates für ObserverMinkowski
+impl Coordinates for ObserverMinkowski {
+    type Value = f64;
+    fn dims(&self) -> usize {
+        self.observer.data.len()
+    }
+    fn coord(&self, i: usize) -> Self::Value {
+        self.observer.data[i]
+    }
+}
+
+// Implementiere Proximity für ObserverMinkowski
+impl Proximity for ObserverMinkowski {
+    type Distance = f64;
+    fn distance(&self, other: &Self) -> Self::Distance {
+        lp_distance(self.p, self, other)
     }
 }
