@@ -418,6 +418,7 @@ impl SDOclust {
         let query_observer = Observer {
             data: observer.to_vec(),
             observations: 0.0,
+            age: 0.0,
             index: 0,
         };
 
@@ -522,6 +523,7 @@ impl SDOclust {
         let point_observer = Observer {
             data: point.to_vec(),
             observations: 0.0,
+            age: 0.0,
             index: 0,
         };
 

@@ -134,13 +134,14 @@ pub struct SDO {
     // Observer-Set, sortiert nach observations
     observers: ObserverSet,
     tree_observers: Option<SpatialTree>,
-    tree_active_observers: RefCell<Option<SpatialTreeObserver>>,
+    #[allow(dead_code)] // Wird von SDOstream verwendet
+    pub(crate) tree_active_observers: RefCell<Option<SpatialTreeObserver>>,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
     tree_type: TreeType,
     rho: f64,
     #[pyo3(get, set)]
-    x: usize,
+    pub(crate) x: usize,
 }
 
 #[pymethods]
@@ -204,6 +205,7 @@ impl SDO {
             observer_list.push(Observer {
                 data: observer_data.clone(),
                 observations: count as f64,
+                age: 1.0, // Start-Alter
                 index: idx,
             });
         }
@@ -517,7 +519,7 @@ impl SDO {
 
 impl SDO {
     /// Erstellt tree_active_observers lazy, wenn noch nicht vorhanden
-    fn ensure_tree_active_observers(&self) {
+    pub(crate) fn ensure_tree_active_observers(&self) {
         if self.tree_active_observers.borrow().is_none() {
             let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
             let num_active = num_active.max(1).min(self.observers.len());
@@ -541,6 +543,7 @@ impl SDO {
         let point_observer = Observer {
             data: point.to_vec(),
             observations: 0.0,
+            age: 0.0,
             index: 0,
         };
         match tree {
@@ -634,6 +637,7 @@ impl SDO {
             .map(|(idx, obs)| Observer {
                 data: obs.data.clone(),
                 observations: obs.observations,
+                age: obs.age,
                 index: idx, // Index in active_observers Liste
             })
             .collect()
@@ -668,8 +672,46 @@ impl SDO {
         self.tree_type
     }
 
-    fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
+    pub(crate) fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
         compute_distance(a, b, self.distance_metric, self.minkowski_p)
+    }
+
+    /// Interne Methode, um Observer-observations zu aktualisieren (für SDOstream)
+    pub(crate) fn update_observer_observations(
+        &mut self,
+        index: usize,
+        new_observations: f64,
+    ) -> bool {
+        self.observers.update_observations(index, new_observations)
+    }
+
+    /// Interne Methode, um Observer-observations und age zu aktualisieren (für SDOstream)
+    #[allow(dead_code)]
+    pub(crate) fn update_observer_with_age(
+        &mut self,
+        index: usize,
+        new_observations: f64,
+        new_age: f64,
+    ) -> bool {
+        self.observers
+            .update_observer(index, new_observations, new_age)
+    }
+
+    /// Interne Methode, um Observer-age zu aktualisieren (für SDOstream)
+    pub(crate) fn update_observer_age(&mut self, index: usize, new_age: f64) -> bool {
+        // Hole aktuellen Observer über get_active_observers_with_indices
+        let observers = self.get_active_observers_with_indices();
+        if let Some(observer) = observers.iter().find(|obs| obs.index == index) {
+            self.observers
+                .update_observer(index, observer.observations, new_age)
+        } else {
+            false
+        }
+    }
+
+    /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)
+    pub(crate) fn replace_observer(&mut self, old_index: usize, new_observer: Observer) -> bool {
+        self.observers.replace(old_index, new_observer)
     }
 
     fn count_points_in_neighborhood(&self, observer: &[f64], data: &[Vec<f64>], x: usize) -> usize {

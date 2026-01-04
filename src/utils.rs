@@ -62,6 +62,7 @@ impl Coordinates for ArcVec {
 pub struct Observer {
     pub data: Vec<f64>,
     pub observations: f64,
+    pub age: f64,
     pub index: usize,
 }
 
@@ -189,6 +190,57 @@ impl ObserverSet {
         } else {
             false
         }
+    }
+
+    /// Aktualisiert observations und age eines Observers
+    pub fn update_observer(&mut self, index: usize, new_observations: f64, new_age: f64) -> bool {
+        // Finde den Observer
+        let observer_opt = self
+            .observers
+            .iter()
+            .find(|obs| obs.observer.index == index)
+            .map(|obs| obs.observer.clone());
+
+        if let Some(mut observer) = observer_opt {
+            // Entferne alten
+            self.observers.remove(&ObserverSorted {
+                observer: observer.clone(),
+            });
+            // Aktualisiere und füge wieder hinzu
+            observer.observations = new_observations;
+            observer.age = new_age;
+            self.observers.insert(ObserverSorted { observer });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Findet den Observer mit dem schlechtesten normalisierten Score (observations/age)
+    /// Gibt (index, normalized_score) zurück, oder None wenn keine Observer vorhanden sind
+    #[allow(dead_code)]
+    pub fn find_worst_normalized_score(&self) -> Option<(usize, f64)> {
+        if self.observers.is_empty() {
+            return None;
+        }
+
+        let mut worst_index = 0;
+        let mut worst_score = f64::INFINITY;
+
+        for obs in self.observers.iter() {
+            let normalized_score = if obs.observer.age > 0.0 {
+                obs.observer.observations / obs.observer.age
+            } else {
+                f64::INFINITY
+            };
+
+            if normalized_score < worst_score {
+                worst_score = normalized_score;
+                worst_index = obs.observer.index;
+            }
+        }
+
+        Some((worst_index, worst_score))
     }
 }
 
