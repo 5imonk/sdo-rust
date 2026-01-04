@@ -8,7 +8,7 @@ name = "sdo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-acap = "0.4"
+kiddo = "5.2"
 rand = "0.8"
 pyo3 = { version = "0.21", features = ["auto-initialize", "extension-module"] }
 numpy = "0.21"
