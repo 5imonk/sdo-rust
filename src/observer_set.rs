@@ -160,26 +160,14 @@ impl ObserverSet {
         }
     }
 
-    /// Create ObserverSet with R*-Tree parameters
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn with_tree_params(distance_metric: DistanceMetric, minkowski_p: Option<f64>) -> Self {
-        Self {
-            observers_by_index: HashMap::new(),
-            indices_by_obs: BTreeMap::new(),
-            indices_by_score: BTreeMap::new(),
-            spatial_tree: RefCell::new(None),
-            distance_metric,
-            minkowski_p,
-        }
-    }
-
-    /// Set R*-Tree parameters and invalidate existing tree
-    #[allow(dead_code)] // Für zukünftige Verwendung
+    /// Set tree parameters and invalidate existing tree
     pub fn set_tree_params(&mut self, distance_metric: DistanceMetric, minkowski_p: Option<f64>) {
         self.distance_metric = distance_metric;
         self.minkowski_p = minkowski_p;
         // Invalidate tree when parameters change
-        *self.spatial_tree.borrow_mut() = None;
+        if let Ok(mut tree_opt) = self.spatial_tree.try_borrow_mut() {
+            *tree_opt = None;
+        }
     }
 
     /// Insert a new observer - O(log n)
@@ -210,7 +198,7 @@ impl ObserverSet {
 
         // Incrementally add to kiddo KD-Tree if it exists (nur für euklidische Distanz)
         // Sonst wird der Baum lazy gebaut wenn nötig
-        self.insert_into_rtree(index, &data);
+        self.insert_into_tree(index, &data);
     }
 
     /// Get observer by index - O(1)
@@ -304,25 +292,6 @@ impl ObserverSet {
             .collect()
     }
 
-    /// Get top N observers as Arc references - O(N), no cloning
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn get_active_arcs(&self, num_active: usize) -> Vec<Arc<Observer>> {
-        self.indices_by_obs
-            .iter()
-            .take(num_active)
-            .filter_map(|(_key, &index)| self.observers_by_index.get(&index).cloned())
-            .collect()
-    }
-
-    /// Iterator over top N observers as Arc references - O(1) to create, O(N) to iterate
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn iter_active_arcs(&self, num_active: usize) -> impl Iterator<Item = Arc<Observer>> + '_ {
-        self.indices_by_obs
-            .iter()
-            .take(num_active)
-            .filter_map(move |(_key, &index)| self.observers_by_index.get(&index).cloned())
-    }
-
     /// Get iterator over active observers (top N by observations) - O(1) to create, O(N) to iterate
     /// More efficient than get_active when you only need to iterate without cloning
     #[allow(dead_code)] // Für zukünftige Verwendung
@@ -337,59 +306,6 @@ impl ObserverSet {
         indices
             .into_iter()
             .filter_map(move |index| self.observers_by_index.get(&index).map(|arc| arc.as_ref()))
-    }
-
-    /// Get all observer indices (for efficient updates without cloning) - O(n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn get_all_indices(&self) -> Vec<usize> {
-        self.observers_by_index.keys().copied().collect()
-    }
-
-    /// Get all observers sorted by observations - O(n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn all(&self) -> Vec<Observer> {
-        self.observers_by_index
-            .values()
-            .map(|arc| (**arc).clone())
-            .collect()
-    }
-
-    /// Get all observers sorted by observations (descending) - O(n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn all_sorted_by_observations(&self) -> Vec<Observer> {
-        self.indices_by_obs
-            .iter()
-            .filter_map(|(_key, &index)| {
-                self.observers_by_index
-                    .get(&index)
-                    .map(|arc| (**arc).clone())
-            })
-            .collect()
-    }
-
-    /// Find the worst observer by normalized score - O(1)
-    #[allow(dead_code)]
-    pub fn find_worst_normalized_score(&self) -> Option<(usize, f64)> {
-        self.indices_by_score
-            .first_key_value() // Gets the smallest (worst) score
-            .and_then(|(key, &index)| {
-                self.observers_by_index
-                    .get(&index)
-                    .map(|_| (index, key.score.0))
-            })
-    }
-
-    /// Get the worst observer by normalized score - O(1)
-    /// Returns the index and Arc reference to the worst observer
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn get_worst_observer(&self) -> Option<(usize, Arc<Observer>)> {
-        self.indices_by_score
-            .first_key_value()
-            .and_then(|(_key, &index)| {
-                self.observers_by_index
-                    .get(&index)
-                    .map(|arc| (index, arc.clone()))
-            })
     }
 
     /// Remove an observer by index - O(log n)
@@ -417,8 +333,8 @@ impl ObserverSet {
         self.indices_by_obs.remove(&obs_key);
         self.indices_by_score.remove(&score_key);
 
-        // Remove Observer from Spatial Tree (rstar supports direct removal)
-        self.remove_from_rtree(index);
+        // Remove Observer from Spatial Tree
+        self.remove_from_tree(index);
 
         // Return owned Observer (dereference Arc)
         Some((*observer_arc).clone())
@@ -450,6 +366,17 @@ impl ObserverSet {
     #[allow(dead_code)] // Für zukünftige Verwendung
     pub fn iter(&self) -> impl Iterator<Item = &Observer> {
         self.observers_by_index.values().map(|arc| arc.as_ref())
+    }
+
+    /// Find the worst observer by normalized score - O(1)
+    pub fn find_worst_normalized_score(&self) -> Option<(usize, f64)> {
+        self.indices_by_score
+            .first_key_value() // Gets the smallest (worst) score
+            .and_then(|(key, &index)| {
+                self.observers_by_index
+                    .get(&index)
+                    .map(|_| (index, key.score.0))
+            })
     }
 
     /// Update only observations - O(log n)
@@ -674,15 +601,60 @@ impl ObserverSet {
             .collect()
     }
 
-    /// Count points within distance
-    /// Verwendet search_k_nearest (kiddo für Euclidean, Brute-Force für andere)
-    pub fn count_points_in_neighborhood(&self, query_point: &[f64], x: usize) -> usize {
-        // Get k nearest neighbors where k = x
-        self.search_k_nearest(query_point, x).len()
+    /// Find k nearest observer indices (not just distances)
+    /// Returns indices of the k nearest observers to the query point
+    /// Optimiert für euklidische Distanz mit kiddo KD-Tree
+    pub fn search_k_nearest_indices(&self, query_point: &[f64], k: usize) -> Vec<usize> {
+        match self.distance_metric {
+            DistanceMetric::Euclidean => {
+                // Verwende kiddo KD-Tree für euklidische Distanz
+                self.ensure_spatial_tree();
+
+                let tree_opt = self.spatial_tree.borrow();
+                if let Some(SpatialTreeObserver::Euclidean(ref kdtree)) = *tree_opt {
+                    // Prüfe Dimension - kiddo unterstützt bis zu 100 Dimensionen
+                    if query_point.len() <= 100 {
+                        // kiddo API: nearest_n benötigt &[f64; 100] - pad query_point
+                        let mut padded_query = [0.0; 100];
+                        for (i, &val) in query_point.iter().take(100).enumerate() {
+                            padded_query[i] = val;
+                        }
+
+                        // kiddo API: nearest_n gibt Vec<NearestNeighbor> zurück
+                        // NearestNeighbor hat .distance und .item (der Index)
+                        let neighbors = kdtree.nearest_n::<SquaredEuclidean>(&padded_query, k);
+                        return neighbors.iter().map(|n| n.item).collect();
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Fallback: Brute-Force für nicht-euklidische Metriken oder sehr hohe Dimensionen
+        let mut observer_distances: Vec<(usize, f64)> = self
+            .observers_by_index
+            .iter()
+            .map(|(&index, arc)| {
+                let dist = compute_distance(
+                    &arc.data,
+                    query_point,
+                    self.distance_metric,
+                    self.minkowski_p,
+                );
+                (index, dist)
+            })
+            .collect();
+
+        observer_distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        observer_distances
+            .into_iter()
+            .take(k)
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     /// Insert observer into kiddo KD-Tree incrementally (nur für euklidische Distanz)
-    fn insert_into_rtree(&mut self, index: usize, data: &[f64]) {
+    fn insert_into_tree(&mut self, index: usize, data: &[f64]) {
         if self.distance_metric != DistanceMetric::Euclidean {
             return; // Kein Baum für nicht-euklidische Metriken
         }
@@ -708,7 +680,7 @@ impl ObserverSet {
     }
 
     /// Remove observer from kiddo KD-Tree incrementally (nur für euklidische Distanz)
-    fn remove_from_rtree(&mut self, index: usize) {
+    fn remove_from_tree(&mut self, index: usize) {
         if self.distance_metric != DistanceMetric::Euclidean {
             return; // Kein Baum für nicht-euklidische Metriken
         }

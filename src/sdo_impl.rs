@@ -115,7 +115,6 @@ impl SDO {
             .collect();
 
         // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
-        // ObserverSet verwendet jetzt HNSW intern
         self.observers = ObserverSet::new();
         self.observers
             .set_tree_params(self.distance_metric, self.minkowski_p);
@@ -131,12 +130,23 @@ impl SDO {
         }
 
         // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
-        // Verwende ObserverSet's HNSW für k-NN-Suche
+        // Für jeden Datenpunkt: Finde die x nächsten Observer und erhöhe deren observations um 1
         self.observers.ensure_spatial_tree();
-        for (idx, observer_data) in observers_data.iter().enumerate() {
-            let count =
-                self.count_points_in_neighborhood_with_tree(observer_data, &data_vec, params.x);
-            self.observers.update_observations(idx, count as f64);
+
+        // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
+        for data_point in &data_vec {
+            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt
+            let nearest_indices = self
+                .observers
+                .search_k_nearest_indices(data_point, params.x);
+
+            // Erhöhe observations für jeden dieser Observer um 1
+            for idx in nearest_indices {
+                if let Some(observer) = self.observers.get(idx) {
+                    let current_obs = observer.observations;
+                    self.observers.update_observations(idx, current_obs + 1.0);
+                }
+            }
         }
 
         Ok(())
