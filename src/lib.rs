@@ -1,4 +1,6 @@
-mod observer_set;
+mod observer;
+mod observer_clust;
+mod observer_stream;
 mod sdo_impl;
 mod sdoclust_impl;
 mod sdostream_impl;

@@ -16,13 +16,12 @@ pub struct Observer {
     /// last time the observer was updated
     pub age: f64,
     pub index: usize,
+    pub label: Option<i32>,
 }
-
-// ObserverRTreeObject wurde entfernt - nicht mehr nötig mit kiddo
 
 // Helper struct for comparing floats in collections
 #[derive(Debug, Clone, Copy)]
-struct OrderedFloat(f64);
+pub(crate) struct OrderedFloat(pub(crate) f64);
 
 impl PartialEq for OrderedFloat {
     fn eq(&self, other: &Self) -> bool {
@@ -47,9 +46,9 @@ impl Ord for OrderedFloat {
 // Composite key for sorting by observations (descending)
 // Key: (OrderedFloat(observations), index) - sorted descending by observations, then by index
 #[derive(Clone, Debug, Copy)]
-struct ObservationKey {
-    observations: OrderedFloat,
-    index: usize,
+pub(crate) struct ObservationKey {
+    pub(crate) observations: OrderedFloat,
+    pub(crate) index: usize,
 }
 
 impl PartialEq for ObservationKey {
@@ -80,9 +79,9 @@ impl Ord for ObservationKey {
 // Composite key for sorting by normalized score (ascending - worst first)
 // Key: (OrderedFloat(normalized_score), index) - sorted ascending by score, then by index
 #[derive(Clone, Debug, Copy)]
-struct NormalizedScoreKey {
-    score: OrderedFloat,
-    index: usize,
+pub(crate) struct NormalizedScoreKey {
+    pub(crate) score: OrderedFloat,
+    pub(crate) index: usize,
 }
 
 impl PartialEq for NormalizedScoreKey {
@@ -127,25 +126,29 @@ pub(crate) enum SpatialTreeObserver {
 /// Uses Arc<Observer> for shared ownership and direct access without HashMap lookups
 pub struct ObserverSet {
     // Primary storage: O(1) access by index, Arc for shared ownership
-    observers_by_index: HashMap<usize, Arc<Observer>>,
+    pub(crate) observers_by_index: HashMap<usize, Arc<Observer>>,
 
     // Secondary index: sorted by observations (descending) - stores only indices
     // Key: (observations, index) -> index
     // BTreeMap gives us O(log n) for min/max and sorted iteration
-    indices_by_obs: BTreeMap<ObservationKey, usize>,
+    pub(crate) indices_by_obs: BTreeMap<ObservationKey, usize>,
 
     // Tertiary index: sorted by normalized score (observations/age, ascending) - stores only indices
     // Key: (normalized_score, index) -> index
     // This allows O(log n) finding of worst observer
-    indices_by_score: BTreeMap<NormalizedScoreKey, usize>,
+    pub(crate) indices_by_score: BTreeMap<NormalizedScoreKey, usize>,
 
     // R*-Tree spatial index for efficient k-NN operations with incremental updates
     // Lazy-initialized and supports incremental insertions and removals
     spatial_tree: RefCell<Option<SpatialTreeObserver>>,
+    spatial_tree_active: RefCell<Option<SpatialTreeObserver>>,
 
     // Parameters for R*-Tree construction
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
+
+    // Number of active observers
+    num_active: usize,
 }
 
 impl ObserverSet {
@@ -155,8 +158,10 @@ impl ObserverSet {
             indices_by_obs: BTreeMap::new(),
             indices_by_score: BTreeMap::new(),
             spatial_tree: RefCell::new(None),
+            spatial_tree_active: RefCell::new(None),
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
+            num_active: 0,
         }
     }
 
@@ -166,6 +171,32 @@ impl ObserverSet {
         self.minkowski_p = minkowski_p;
         // Invalidate tree when parameters change
         if let Ok(mut tree_opt) = self.spatial_tree.try_borrow_mut() {
+            *tree_opt = None;
+        }
+        if let Ok(mut tree_opt) = self.spatial_tree_active.try_borrow_mut() {
+            *tree_opt = None;
+        }
+    }
+
+    /// Get distance metric
+    pub fn get_distance_metric(&self) -> DistanceMetric {
+        self.distance_metric
+    }
+
+    /// Get minkowski_p parameter
+    pub fn get_minkowski_p(&self) -> Option<f64> {
+        self.minkowski_p
+    }
+
+    /// Set num_active
+    /// If num_active is set, the spatial tree will be built with only the active observers
+    pub fn set_num_active(&mut self, num_active: usize) {
+        if num_active == self.num_active {
+            return;
+        }
+        self.num_active = num_active;
+        // Invalidate tree when num_active changes
+        if let Ok(mut tree_opt) = self.spatial_tree_active.try_borrow_mut() {
             *tree_opt = None;
         }
     }
@@ -202,7 +233,6 @@ impl ObserverSet {
     }
 
     /// Get observer by index - O(1)
-    #[allow(dead_code)] // Für zukünftige Verwendung
     pub fn get(&self, index: usize) -> Option<&Observer> {
         self.observers_by_index.get(&index).map(|arc| arc.as_ref())
     }
@@ -250,6 +280,7 @@ impl ObserverSet {
                     time: observer_arc.time,
                     age: new_age,
                     index: observer_arc.index,
+                    label: observer_arc.label,
                 })
             }
         };
@@ -280,10 +311,14 @@ impl ObserverSet {
 
     /// Get top N observers by observations - O(N)
     /// Clones observers - use get_active_arcs() for better performance
-    pub fn get_active(&self, num_active: usize) -> Vec<Observer> {
+    pub fn get_observers(&self, active: bool) -> Vec<Observer> {
         self.indices_by_obs
             .iter()
-            .take(num_active)
+            .take(if active {
+                self.num_active
+            } else {
+                self.observers_by_index.len()
+            })
             .filter_map(|(_key, &index)| {
                 self.observers_by_index
                     .get(&index)
@@ -294,13 +329,16 @@ impl ObserverSet {
 
     /// Get iterator over active observers (top N by observations) - O(1) to create, O(N) to iterate
     /// More efficient than get_active when you only need to iterate without cloning
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn iter_active(&self, num_active: usize) -> impl Iterator<Item = &Observer> {
+    pub fn iter_observers(&self, active: bool) -> impl Iterator<Item = &Observer> {
         // Collect indices first, then map to Arc dereferences
         let indices: Vec<usize> = self
             .indices_by_obs
             .iter()
-            .take(num_active)
+            .take(if active {
+                self.num_active
+            } else {
+                self.observers_by_index.len()
+            })
             .map(|(_key, &index)| index)
             .collect();
         indices
@@ -369,18 +407,16 @@ impl ObserverSet {
     }
 
     /// Find the worst observer by normalized score - O(1)
-    pub fn find_worst_normalized_score(&self) -> Option<(usize, f64)> {
+    /// By default k = 1
+    pub fn find_k_worst_normalized_scores(&self, k: Option<usize>) -> Vec<(usize, f64)> {
         self.indices_by_score
-            .first_key_value() // Gets the smallest (worst) score
-            .and_then(|(key, &index)| {
-                self.observers_by_index
-                    .get(&index)
-                    .map(|_| (index, key.score.0))
-            })
+            .iter()
+            .take(k.unwrap_or(1))
+            .map(|(key, &index)| (index, key.score.0))
+            .collect()
     }
 
     /// Update only observations - O(log n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
     pub fn update_observations(&mut self, index: usize, new_observations: f64) -> bool {
         if let Some(observer) = self.observers_by_index.get(&index) {
             let current_age = observer.age;
@@ -390,128 +426,61 @@ impl ObserverSet {
         }
     }
 
-    /// Update only age - O(log n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn update_age(&mut self, index: usize, new_age: f64) -> bool {
-        if let Some(observer) = self.observers_by_index.get(&index) {
-            let current_obs = observer.observations;
-            self.update_observer(index, current_obs, new_age)
-        } else {
-            false
-        }
-    }
-
-    /// Update observations and age - O(log n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn update_observations_and_age(
-        &mut self,
-        index: usize,
-        new_observations: f64,
-        new_age: f64,
-    ) -> bool {
-        if self.observers_by_index.contains_key(&index) {
-            self.update_observer(index, new_observations, new_age)
-        } else {
-            false
-        }
-    }
-
-    /// Update observations, age, and time - O(log n)
-    /// Wichtig für zeitbasierte Updates in SDOstream
-    pub fn update_observer_with_time(
-        &mut self,
-        index: usize,
-        new_observations: f64,
-        new_age: f64,
-        new_time: f64,
-    ) -> bool {
-        // Get the current observer Arc
-        let observer_arc = match self.observers_by_index.get(&index) {
-            Some(arc) => arc.clone(),
-            None => return false,
-        };
-
-        // Remove old entries from secondary indices using old values
-        let old_obs_key = ObservationKey {
-            observations: OrderedFloat(observer_arc.observations),
-            index,
-        };
-        let old_normalized_score = if observer_arc.age > 0.0 {
-            observer_arc.observations / observer_arc.age
-        } else {
-            f64::INFINITY
-        };
-        let old_score_key = NormalizedScoreKey {
-            score: OrderedFloat(old_normalized_score),
-            index,
-        };
-
-        self.indices_by_obs.remove(&old_obs_key);
-        self.indices_by_score.remove(&old_score_key);
-
-        // Update the observer - try to update in place if we have exclusive access
-        let updated_observer = {
-            // Get mutable reference to the Arc in the HashMap
-            let arc_mut = self.observers_by_index.get_mut(&index).unwrap();
-            if let Some(mut_observer) = Arc::get_mut(arc_mut) {
+    /// Update observer label - O(1)
+    pub fn update_label(&mut self, index: usize, label: Option<i32>) -> bool {
+        if let Some(arc) = self.observers_by_index.get_mut(&index) {
+            if let Some(mut_observer) = Arc::get_mut(arc) {
                 // Exclusive access - update in place (no clone!)
-                mut_observer.observations = new_observations;
-                mut_observer.age = new_age;
-                mut_observer.time = new_time;
-                Arc::clone(arc_mut) // Clone the Arc reference, not the Observer
+                mut_observer.label = label;
+                true
             } else {
-                // Shared - create new Arc with updated values
-                Arc::new(Observer {
+                // Shared - create new Arc with updated label
+                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
+                let updated_observer = Arc::new(Observer {
                     data: observer_arc.data.clone(),
-                    observations: new_observations,
-                    time: new_time,
-                    age: new_age,
+                    observations: observer_arc.observations,
+                    time: observer_arc.time,
+                    age: observer_arc.age,
                     index: observer_arc.index,
-                })
+                    label,
+                });
+                self.observers_by_index.insert(index, updated_observer);
+                true
             }
-        };
-
-        // Update HashMap with new Arc
-        self.observers_by_index.insert(index, updated_observer);
-
-        // Re-insert with updated values
-        let new_obs_key = ObservationKey {
-            observations: OrderedFloat(new_observations),
-            index,
-        };
-        let new_normalized_score = if new_age > 0.0 {
-            new_observations / new_age
         } else {
-            f64::INFINITY
-        };
-        let new_score_key = NormalizedScoreKey {
-            score: OrderedFloat(new_normalized_score),
-            index,
-        };
-
-        self.indices_by_obs.insert(new_obs_key, index);
-        self.indices_by_score.insert(new_score_key, index);
-
-        true
+            false
+        }
     }
 
     /// Get spatial tree (builds if necessary)
+    /// Wenn active=true, gibt den Baum für aktive Observer zurück
     #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn get_spatial_tree(&self) -> Option<std::cell::Ref<'_, Option<SpatialTreeObserver>>> {
-        Some(self.spatial_tree.borrow())
+    pub fn get_spatial_tree(
+        &self,
+        active: bool,
+    ) -> Option<std::cell::Ref<'_, Option<SpatialTreeObserver>>> {
+        if active {
+            Some(self.spatial_tree_active.borrow())
+        } else {
+            Some(self.spatial_tree.borrow())
+        }
     }
 
     /// Stellt sicher, dass der Spatial Tree gebaut ist (lazy initialization)
     /// Nur für euklidische Distanz wird ein kiddo KD-Tree gebaut
     /// Diese Methode ist thread-safe durch RefCell, aber nicht re-entrant
-    pub fn ensure_spatial_tree(&self) {
+    pub fn ensure_spatial_tree(&self, active: bool) {
         if self.distance_metric != DistanceMetric::Euclidean {
             return; // Kein Baum für nicht-euklidische Metriken
         }
 
         // Prüfe zuerst, ob der Baum bereits existiert (immutable borrow)
         // Verwende try_borrow() um zu vermeiden, dass wir panicken wenn bereits geborrowt
-        if let Ok(tree_opt) = self.spatial_tree.try_borrow() {
+        if let Ok(tree_opt) = if active {
+            self.spatial_tree_active.try_borrow()
+        } else {
+            self.spatial_tree.try_borrow()
+        } {
             if tree_opt.is_some() {
                 return; // Baum existiert bereits
             }
@@ -523,12 +492,25 @@ impl ObserverSet {
 
         // Jetzt mutable borrow für den Build
         // Verwende try_borrow_mut() um zu vermeiden, dass wir panicken wenn bereits geborrowt
-        if let Ok(mut tree_opt) = self.spatial_tree.try_borrow_mut() {
+        if let Ok(mut tree_opt) = if active {
+            self.spatial_tree_active.try_borrow_mut()
+        } else {
+            self.spatial_tree.try_borrow_mut()
+        } {
             if tree_opt.is_none() {
-                // Baue kiddo KD-Tree aus allen aktuellen Observers (nur für Euclidean)
-                let all_observers: Vec<Arc<Observer>> =
-                    self.observers_by_index.values().cloned().collect();
-                *tree_opt = Self::build_tree_from_observers(&all_observers, self.distance_metric);
+                // Baue kiddo KD-Tree aus Observers
+                // Wenn active=true, verwende nur aktive Observer
+                let observers: Vec<Arc<Observer>> = if active {
+                    self.iter_observers(true)
+                        .map(|obs| {
+                            // Hole Arc aus observers_by_index
+                            self.observers_by_index.get(&obs.index).unwrap().clone()
+                        })
+                        .collect()
+                } else {
+                    self.observers_by_index.values().cloned().collect()
+                };
+                *tree_opt = Self::build_tree_from_observers(&observers, self.distance_metric);
             }
         }
         // Wenn try_borrow_mut() fehlschlägt, bedeutet das, dass der Baum gerade gebaut wird
@@ -538,20 +520,29 @@ impl ObserverSet {
     /// Perform k-nearest neighbor search
     /// Für euklidische Distanz: verwendet kiddo KD-Tree
     /// Für andere Metriken: Brute-Force
-    pub fn search_k_nearest(&self, query_point: &[f64], k: usize) -> Vec<f64> {
+    pub fn search_k_nearest_distances(
+        &self,
+        query_point: &[f64],
+        k: usize,
+        active: bool,
+    ) -> Vec<f64> {
         match self.distance_metric {
             DistanceMetric::Euclidean => {
                 // Verwende kiddo KD-Tree für euklidische Distanz
                 // Stelle sicher, dass der Baum existiert
-                self.ensure_spatial_tree();
+                self.ensure_spatial_tree(active);
 
                 // Separate Borrow nach ensure_spatial_tree() (Borrow sollte zurückgegeben sein)
-                let tree_opt = self.spatial_tree.borrow();
+                let tree_opt = if active {
+                    self.spatial_tree_active.borrow()
+                } else {
+                    self.spatial_tree.borrow()
+                };
                 if let Some(SpatialTreeObserver::Euclidean(ref kdtree)) = *tree_opt {
                     // Prüfe Dimension - kiddo unterstützt bis zu 100 Dimensionen
                     if query_point.len() > 100 {
                         // Fallback zu Brute-Force für sehr hohe Dimensionen
-                        return self.brute_force_k_nearest(query_point, k);
+                        return self.brute_force_k_nearest(query_point, k, active);
                     }
 
                     // kiddo API: nearest_n benötigt &[f64; 100] - pad query_point
@@ -565,31 +556,33 @@ impl ObserverSet {
                     // Verwende SquaredEuclidean für euklidische Distanz
                     let neighbors = kdtree.nearest_n::<SquaredEuclidean>(&padded_query, k);
                     // kiddo gibt quadrierte Distanz zurück, wir müssen die Wurzel ziehen
+                    // Der Baum enthält bereits nur aktive Observer, wenn active=true
                     neighbors.iter().map(|n| n.distance.sqrt()).collect()
                 } else {
-                    self.brute_force_k_nearest(query_point, k)
+                    self.brute_force_k_nearest(query_point, k, active)
                 }
             }
             _ => {
                 // Für andere Metriken: Brute-Force
-                self.brute_force_k_nearest(query_point, k)
+                self.brute_force_k_nearest(query_point, k, active)
             }
         }
     }
 
     /// Brute-Force k-nearest neighbor search für nicht-euklidische Metriken
-    fn brute_force_k_nearest(&self, query_point: &[f64], k: usize) -> Vec<f64> {
+    fn brute_force_k_nearest(&self, query_point: &[f64], k: usize, active: bool) -> Vec<f64> {
         let mut distances: Vec<(usize, f64)> = self
-            .observers_by_index
-            .iter()
-            .map(|(&index, arc)| {
-                let dist = compute_distance(
-                    &arc.data,
-                    query_point,
-                    self.distance_metric,
-                    self.minkowski_p,
-                );
-                (index, dist)
+            .iter_observers(active)
+            .map(|obs| {
+                (
+                    obs.index,
+                    compute_distance(
+                        &obs.data,
+                        query_point,
+                        self.distance_metric,
+                        self.minkowski_p,
+                    ),
+                )
             })
             .collect();
 
@@ -604,44 +597,52 @@ impl ObserverSet {
     /// Find k nearest observer indices (not just distances)
     /// Returns indices of the k nearest observers to the query point
     /// Optimiert für euklidische Distanz mit kiddo KD-Tree
-    pub fn search_k_nearest_indices(&self, query_point: &[f64], k: usize) -> Vec<usize> {
-        match self.distance_metric {
-            DistanceMetric::Euclidean => {
-                // Verwende kiddo KD-Tree für euklidische Distanz
-                self.ensure_spatial_tree();
+    pub fn search_k_nearest_indices(
+        &self,
+        query_point: &[f64],
+        k: usize,
+        active: bool,
+    ) -> Vec<usize> {
+        if self.distance_metric == DistanceMetric::Euclidean {
+            // Verwende kiddo KD-Tree für euklidische Distanz
+            self.ensure_spatial_tree(active);
 
-                let tree_opt = self.spatial_tree.borrow();
-                if let Some(SpatialTreeObserver::Euclidean(ref kdtree)) = *tree_opt {
-                    // Prüfe Dimension - kiddo unterstützt bis zu 100 Dimensionen
-                    if query_point.len() <= 100 {
-                        // kiddo API: nearest_n benötigt &[f64; 100] - pad query_point
-                        let mut padded_query = [0.0; 100];
-                        for (i, &val) in query_point.iter().take(100).enumerate() {
-                            padded_query[i] = val;
-                        }
-
-                        // kiddo API: nearest_n gibt Vec<NearestNeighbor> zurück
-                        // NearestNeighbor hat .distance und .item (der Index)
-                        let neighbors = kdtree.nearest_n::<SquaredEuclidean>(&padded_query, k);
-                        return neighbors.iter().map(|n| n.item).collect();
+            let tree_opt = if active {
+                self.spatial_tree_active.borrow()
+            } else {
+                self.spatial_tree.borrow()
+            };
+            if let Some(SpatialTreeObserver::Euclidean(ref kdtree)) = *tree_opt {
+                // Prüfe Dimension - kiddo unterstützt bis zu 100 Dimensionen
+                if query_point.len() <= 100 {
+                    // kiddo API: nearest_n benötigt &[f64; 100] - pad query_point
+                    let mut padded_query = [0.0; 100];
+                    for (i, &val) in query_point.iter().take(100).enumerate() {
+                        padded_query[i] = val;
                     }
+
+                    // kiddo API: nearest_n gibt Vec<NearestNeighbor> zurück
+                    // NearestNeighbor hat .distance und .item (der Index)
+                    let neighbors = kdtree.nearest_n::<SquaredEuclidean>(&padded_query, k);
+                    // Der Baum enthält bereits nur aktive Observer, wenn active=true
+                    return neighbors.iter().map(|n| n.item).collect();
                 }
             }
-            _ => {}
         }
 
         // Fallback: Brute-Force für nicht-euklidische Metriken oder sehr hohe Dimensionen
         let mut observer_distances: Vec<(usize, f64)> = self
-            .observers_by_index
-            .iter()
-            .map(|(&index, arc)| {
-                let dist = compute_distance(
-                    &arc.data,
-                    query_point,
-                    self.distance_metric,
-                    self.minkowski_p,
-                );
-                (index, dist)
+            .iter_observers(active)
+            .map(|obs| {
+                (
+                    obs.index,
+                    compute_distance(
+                        &obs.data,
+                        query_point,
+                        self.distance_metric,
+                        self.minkowski_p,
+                    ),
+                )
             })
             .collect();
 
@@ -709,6 +710,7 @@ impl ObserverSet {
 
     /// Build kiddo KD-Tree from observers (nur für euklidische Distanz)
     /// Für andere Metriken wird kein Baum gebaut (NonEuclidean)
+    /// Wenn active=true, werden nur die aktiven Observer verwendet
     fn build_tree_from_observers(
         observers: &[Arc<Observer>],
         metric: DistanceMetric,
@@ -730,9 +732,8 @@ impl ObserverSet {
                     }
 
                     // Erstelle Punkt-Array für kiddo (pad auf 100 Dimensionen)
-                    let point_array: Vec<f64> = data.iter().take(100).cloned().collect();
                     let mut padded_point = [0.0; 100];
-                    for (i, &val) in point_array.iter().enumerate() {
+                    for (i, &val) in data.iter().take(100).enumerate() {
                         padded_point[i] = val;
                     }
 
@@ -756,6 +757,7 @@ impl ObserverSet {
         self.indices_by_obs.clear();
         self.indices_by_score.clear();
         *self.spatial_tree.borrow_mut() = None;
+        *self.spatial_tree_active.borrow_mut() = None;
     }
 }
 

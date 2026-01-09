@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use rand::{thread_rng, Rng};
 use std::f64;
 
-use crate::observer_set::Observer;
+use crate::observer::Observer;
 use crate::sdo_impl::{SDOParams, SDO};
 
 /// Parameter-Struktur für SDOstream
@@ -80,6 +80,8 @@ pub struct SDOstream {
     fading: f64,                  // f = exp(-T^-1)
     sampling_rate: f64,           // T_k = -k · ln(f)
     data_points_processed: usize, // Zähler für Sampling
+    k: usize,                     // Anzahl der Observer (Modellgröße)
+    t: f64,                       // T-Parameter für fading
 }
 
 #[pymethods]
@@ -91,55 +93,32 @@ impl SDOstream {
             fading: 0.99,
             sampling_rate: 0.01,
             data_points_processed: 0,
+            k: 100,
+            t: 100.0,
         }
     }
 
-    /// Initialisiert das Modell mit initialen Daten (optional)
-    pub fn initialize(
-        &mut self,
-        data: PyReadonlyArray2<f64>,
-        params: &SDOstreamParams,
-    ) -> PyResult<()> {
-        let data_slice = data.as_array();
-        let rows = data_slice.nrows();
-
-        if rows == 0 || params.k == 0 {
-            return Ok(());
-        }
-
-        // Konvertiere zu SDOParams (mit rho=0)
-        let sdo_params = params.to_sdo_params();
-
-        // Verwende SDO's learn-Methode
-        self.sdo.learn(data, &sdo_params)?;
+    /// Initialisiert das Modell mit Parametern und einem leeren ObserverSet
+    pub fn initialize(&mut self, params: &SDOstreamParams) -> PyResult<()> {
+        self.k = params.k;
+        self.t = params.t;
 
         // Initialisiere Streaming-spezifische Parameter
         self.fading = params.get_fading();
         self.sampling_rate = params.get_sampling_rate();
 
-        // Initialisiere Alter und Zeit für alle Observer (starten mit age=1.0, time=0.0)
-        // Hole alle Observer aus SDO (über get_active_observers_with_indices)
-        let observers = self.sdo.get_active_observers_with_indices();
-        for observer in observers {
-            // Aktualisiere age und time direkt in SDO's ObserverSet
-            // Verwende update_observer_with_time mit time=0.0 für Initialisierung
-            self.sdo.observers.update_observer_with_time(
-                observer.index,
-                observer.observations,
-                1.0,
-                0.0,
-            );
-        }
+        // Initialisiere SDO mit Parametern
+        let sdo_params = params.to_sdo_params();
+        self.sdo.initialize(&sdo_params)?;
 
         Ok(())
     }
 
     /// Verarbeitet einen einzelnen Datenpunkt aus dem Stream
-    #[pyo3(signature = (point, params, *, time = None))]
+    #[pyo3(signature = (point, *, time = None))]
     pub fn learn(
         &mut self,
         point: PyReadonlyArray2<f64>,
-        params: &SDOstreamParams,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<()> {
         let point_slice = point.as_array();
@@ -168,16 +147,17 @@ impl SDOstream {
             self.data_points_processed as f64
         };
 
-        // Aktualisiere Streaming-Parameter
-        self.fading = params.get_fading();
-        self.sampling_rate = params.get_sampling_rate();
-
         // Schritt 1: Finde x-nächste Observer (verwende SDO's Tree)
-        let nearest_observer_indices = self.find_x_nearest_observers(&point_vec, params.x)?;
+        let x = self.sdo.x;
+        let nearest_observer_indices = self.find_x_nearest_observers(&point_vec, x)?;
 
         // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
         // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
-        self.update_observations_with_fading(&nearest_observer_indices, current_time)?;
+        self.sdo.observers.update_observations_with_fading(
+            &nearest_observer_indices,
+            self.fading,
+            current_time,
+        );
 
         // Schritt 3: Sampling - ersetze Observer basierend auf normalisierter Qualität
         // Increment data_points_processed nur wenn time nicht explizit angegeben wurde
@@ -185,11 +165,8 @@ impl SDOstream {
             self.data_points_processed += 1;
         }
         if self.should_sample() {
-            self.replace_observer(&point_vec, params)?;
+            self.replace_observer(&point_vec, current_time)?;
         }
-
-        // Schritt 5: Invalidate Tree in SDO (wird lazy neu erstellt)
-        *self.sdo.tree_active_observers.borrow_mut() = None;
 
         Ok(())
     }
@@ -201,12 +178,6 @@ impl SDOstream {
         self.sdo.predict(point)
     }
 
-    /// Gibt die Anzahl der Observer zurück
-    pub fn n_observers(&self) -> usize {
-        // Hole über SDO's interne Observer
-        self.sdo.get_active_observers_with_indices().len()
-    }
-
     /// Gibt x zurück (für Kompatibilität)
     #[getter]
     pub fn x(&self) -> usize {
@@ -215,12 +186,8 @@ impl SDOstream {
 }
 
 impl SDOstream {
-    /// Findet die x-nächsten Observer zu einem Punkt (verwendet SDO's Tree)
     fn find_x_nearest_observers(&self, point: &[f64], x: usize) -> PyResult<Vec<usize>> {
-        // Verwende SDO's Tree für k-nearest neighbors
-        self.sdo.ensure_tree_active_observers();
-
-        let observers = self.sdo.get_active_observers_with_indices();
+        let observers = self.sdo.observers.get_observers(true);
         if observers.is_empty() {
             return Ok(Vec::new());
         }
@@ -239,69 +206,6 @@ impl SDOstream {
         Ok(distances.into_iter().take(x).map(|(idx, _)| idx).collect())
     }
 
-    /// Aktualisiert Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
-    /// Hω ← f^(ti - ti-1) · Hω + 1
-    /// Pω ← f^(ti - ti-1) · Pω + 1 wenn ω unter den x-nächsten, sonst Pω ← f^(ti - ti-1) · Pω
-    fn update_observations_with_fading(
-        &mut self,
-        nearest_indices: &[usize],
-        current_time: f64,
-    ) -> PyResult<()> {
-        // Sammle Observer-Daten in separatem Scope, um Borrow-Konflikte zu vermeiden
-        let updates: Vec<(usize, f64, f64)> = {
-            let nearest_set: std::collections::HashSet<usize> =
-                nearest_indices.iter().cloned().collect();
-
-            // Verwende iter_active_observers für effizienten Zugriff ohne Kopie
-            self.sdo
-                .iter_active_observers()
-                .map(|observer| {
-                    // Berechne Zeitdifferenz: ti - ti-1
-                    let time_diff = current_time - observer.time;
-
-                    // Berechne fading-Faktor für diese Zeitdifferenz: f^(ti - ti-1)
-                    let fading_factor = self.fading.powf(time_diff);
-
-                    // Update observations: Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
-                    let new_observations = if nearest_set.contains(&observer.index) {
-                        fading_factor * observer.observations + 1.0
-                    } else {
-                        fading_factor * observer.observations
-                    };
-
-                    // Update age: Hω ← f^(ti - ti-1) · Hω + 1
-                    // Beachte: Die Formel zeigt Hω ← f^(ti - ti-1) · Hω + 1, aber age sollte nur gefadet werden
-                    // Laut Formel: Pω ← f^(ti - ti-1) · Pω, also age auch nur faden
-                    let new_age = fading_factor * observer.age + 1.0;
-
-                    (observer.index, new_observations, new_age)
-                })
-                .collect()
-        };
-
-        // Aktualisiere jeden Observer mit observations, age und time - O(n) Iteration, O(log n) pro Update
-        for (index, new_observations, new_age) in updates {
-            self.sdo.observers.update_observer_with_time(
-                index,
-                new_observations,
-                new_age,
-                current_time,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Erhöht das Alter Hω für alle Observer
-    #[allow(dead_code)]
-    fn increment_ages(&mut self) {
-        let observers = self.sdo.get_active_observers_with_indices();
-        for observer in observers {
-            let new_age = observer.age + 1.0;
-            self.sdo.update_observer_age(observer.index, new_age);
-        }
-    }
-
     /// Prüft, ob ein Observer ersetzt werden sollte basierend auf Sampling-Rate
     fn should_sample(&self) -> bool {
         if self.sampling_rate <= 0.0 {
@@ -312,10 +216,11 @@ impl SDOstream {
     }
 
     /// Ersetzt einen Observer basierend auf normalisierter Qualitätsmetrik P̃ω = Pω / Hω
-    fn replace_observer(&mut self, new_point: &[f64], _params: &SDOstreamParams) -> PyResult<()> {
-        // Verwende die optimierte find_worst_normalized_score Methode - O(1) statt O(n)
-        let (replace_idx, _score) = match self.sdo.find_worst_normalized_score() {
-            Some(result) => result,
+    fn replace_observer(&mut self, new_point: &[f64], current_time: f64) -> PyResult<()> {
+        // Verwende die optimierte find_k_worst_normalized_scores Methode - O(1) statt O(n)
+        let worst_scores = self.sdo.observers.find_k_worst_normalized_scores(Some(1));
+        let (replace_idx, _score) = match worst_scores.first() {
+            Some((idx, score)) => (*idx, *score),
             None => return Ok(()), // Keine Observer vorhanden
         };
 
@@ -324,10 +229,11 @@ impl SDOstream {
         // Da wir hier keine Zeit haben, verwenden wir 0.0 (wird beim nächsten Update korrigiert)
         let new_observer = Observer {
             data: new_point.to_vec(),
-            observations: 0.0,  // Neuer Observer startet mit Pω = 0
-            time: 0.0,          // Wird beim nächsten Update auf aktuelle Zeit gesetzt
+            observations: 1.0,  // Neuer Observer startet mit Pω = 0
+            time: current_time, // Setze time auf aktuelle Zeit
             age: 1.0,           // Neuer Observer startet mit Hω = 1
             index: replace_idx, // Verwende den Index des ersetzten Observers
+            label: None,
         };
 
         // Verwende SDO's replace_observer Methode - O(log n)

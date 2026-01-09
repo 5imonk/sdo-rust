@@ -1,12 +1,10 @@
-use std::cell::RefCell;
-
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::f64;
 
-use crate::observer_set::{Observer, ObserverSet, SpatialTreeObserver};
+use crate::observer::{Observer, ObserverSet};
 use crate::utils::{compute_distance, DistanceMetric};
 
 // SpatialTreeObserver moved to observer_set.rs (now uses HNSW)
@@ -59,13 +57,12 @@ impl SDOParams {
 pub struct SDO {
     // Observer-Set, sortiert nach observations (verwendet HNSW intern)
     pub(crate) observers: ObserverSet,
-    #[allow(dead_code)] // Wird von SDOstream verwendet
-    pub(crate) tree_active_observers: RefCell<Option<SpatialTreeObserver>>,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
     rho: f64,
     #[pyo3(get, set)]
     pub(crate) x: usize,
+    k: usize, // Anzahl der Observer (Modellgröße)
 }
 
 #[pymethods]
@@ -74,21 +71,35 @@ impl SDO {
     pub fn new() -> Self {
         Self {
             observers: ObserverSet::new(),
-            tree_active_observers: RefCell::new(None),
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
             rho: 0.1,
             x: 10,
+            k: 100,
         }
     }
 
+    /// Initialisiert das Modell mit Parametern und einem leeren ObserverSet
+    pub fn initialize(&mut self, params: &SDOParams) -> PyResult<()> {
+        self.x = params.x;
+        self.k = params.k;
+        self.distance_metric = params.get_metric();
+        self.minkowski_p = params.minkowski_p;
+        self.rho = params.rho;
+        // Initialisiere leeres ObserverSet mit Parametern
+        self.observers = ObserverSet::new();
+        self.observers
+            .set_tree_params(self.distance_metric, self.minkowski_p);
+        Ok(())
+    }
+
     /// Lernt das Modell aus den Daten
-    pub fn learn(&mut self, data: PyReadonlyArray2<f64>, params: &SDOParams) -> PyResult<()> {
+    pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
         let data_slice = data.as_array();
         let rows = data_slice.nrows();
         let cols = data_slice.ncols();
 
-        if rows == 0 || params.k == 0 {
+        if rows == 0 || self.k == 0 {
             return Ok(());
         }
 
@@ -97,25 +108,16 @@ impl SDO {
             .map(|i| (0..cols).map(|j| data_slice[[i, j]]).collect())
             .collect();
 
-        self.x = params.x;
-        self.distance_metric = params.get_metric();
-        self.minkowski_p = params.minkowski_p;
-        self.rho = params.rho;
-        // Set tree parameters in ObserverSet
-        self.observers
-            .set_tree_params(self.distance_metric, self.minkowski_p);
-        // Reset tree_active_observers, da sich die Parameter geändert haben
-        *self.tree_active_observers.borrow_mut() = None;
-
         // Schritt 1: Sample
         let mut rng = thread_rng();
         let observers_data: Vec<Vec<f64>> = data_vec
-            .choose_multiple(&mut rng, params.k.min(data_vec.len()))
+            .choose_multiple(&mut rng, self.k.min(data_vec.len()))
             .cloned()
             .collect();
 
         // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
-        self.observers = ObserverSet::new();
+        // ObserverSet wurde bereits in initialize() erstellt, aber wir müssen sicherstellen,
+        // dass die Parameter gesetzt sind
         self.observers
             .set_tree_params(self.distance_metric, self.minkowski_p);
         for (idx, observer_data) in observers_data.iter().enumerate() {
@@ -125,20 +127,19 @@ impl SDO {
                 time: 0.0,
                 age: 1.0,
                 index: idx,
+                label: None,
             };
             self.observers.insert(observer);
         }
 
         // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
-        // Für jeden Datenpunkt: Finde die x nächsten Observer und erhöhe deren observations um 1
-        self.observers.ensure_spatial_tree();
 
         // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
         for data_point in &data_vec {
             // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt
             let nearest_indices = self
                 .observers
-                .search_k_nearest_indices(data_point, params.x);
+                .search_k_nearest_indices(data_point, self.x, false);
 
             // Erhöhe observations für jeden dieser Observer um 1
             for idx in nearest_indices {
@@ -148,6 +149,10 @@ impl SDO {
                 }
             }
         }
+
+        // Set num_active
+        self.observers
+            .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
 
         Ok(())
     }
@@ -169,23 +174,10 @@ impl SDO {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        // Lazy: Berechne aktive Observer nur wenn nötig
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        let active_observers = self.observers.get_active(num_active);
-
-        if active_observers.is_empty() {
-            return Ok(f64::INFINITY);
-        }
-
-        let k = self.x.min(active_observers.len());
-
-        // Versuche kiddo KD-Tree-basierte Nearest Neighbor Search zu verwenden
-        // Erstelle tree_active_observers lazy, wenn noch nicht vorhanden
-        self.ensure_tree_active_observers();
-
-        // Verwende ObserverSet's search_k_nearest direkt, um Borrow-Konflikte zu vermeiden
-        let distances = self.observers.search_k_nearest(&point_vec, k);
+        // Suche nur unter den aktiven Observers
+        let distances = self
+            .observers
+            .search_k_nearest_distances(&point_vec, self.x, true);
 
         if distances.is_empty() {
             return Ok(f64::INFINITY);
@@ -203,9 +195,7 @@ impl SDO {
 
     /// Konvertiert active_observers zu NumPy-Array für Python
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        let active_observers = self.observers.get_active(num_active);
+        let active_observers = self.observers.get_observers(true);
 
         if active_observers.is_empty() {
             let array = PyArray2::zeros_bound(py, (0, 0), false);
@@ -229,126 +219,14 @@ impl SDO {
     }
 }
 
-// Private Hilfsmethoden (nicht für Python)
 impl SDO {
-    /// Zählt Punkte in der Nachbarschaft mit R*-Tree-basierter Nearest Neighbor Search
-    fn count_points_in_neighborhood_with_tree(
-        &self,
-        observer: &[f64],
-        _data: &[Vec<f64>],
-        x: usize,
-    ) -> usize {
-        // Verwende ObserverSet's R*-Tree für k-NN-Suche
-        self.observers.count_points_in_neighborhood(observer, x)
-    }
-}
-
-impl SDO {
-    /// Erstellt tree_active_observers lazy, wenn noch nicht vorhanden
-    pub(crate) fn ensure_tree_active_observers(&self) {
-        // Der Tree wird jetzt in ObserverSet verwaltet (HNSW)
-        self.observers.ensure_spatial_tree();
-    }
-
-    /// Interne Methode, um active_observers zu erhalten (für SDOclust)
-    pub(crate) fn get_active_observers_internal(&self) -> Vec<Vec<f64>> {
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        self.observers
-            .get_active(num_active)
-            .iter()
-            .map(|obs| obs.data.clone())
-            .collect()
-    }
-
-    /// Interne Methode, um active_observers mit Indizes zu erhalten (für SDOclust)
-    /// Gibt Observer-Objekte zurück, wobei index die Position in der active_observers Liste ist
-    pub(crate) fn get_active_observers_with_indices(&self) -> Vec<Observer> {
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        self.observers
-            .get_active(num_active)
-            .iter()
-            .enumerate()
-            .map(|(idx, obs)| Observer {
-                data: obs.data.clone(),
-                observations: obs.observations,
-                time: obs.time,
-                age: obs.age,
-                index: idx, // Index in active_observers Liste
-            })
-            .collect()
-    }
-
-    /// Erstellt und gibt tree_active_observers zurück (für SDOclust)
-    /// Diese Funktion stellt sicher, dass der Tree erstellt ist und gibt eine Referenz zurück
-    pub(crate) fn get_tree_active_observers(
-        &self,
-    ) -> Option<std::cell::Ref<'_, Option<SpatialTreeObserver>>> {
-        self.ensure_tree_active_observers();
-        // Tree wird jetzt direkt aus ObserverSet geholt
-        self.observers.get_spatial_tree()
-    }
-
     /// Interne Methode, um x zu erhalten (für SDOclust)
     pub(crate) fn get_x_internal(&self) -> usize {
         self.x
     }
 
-    /// Interne Methode, um distance_metric zu erhalten (für SDOclust)
-    pub(crate) fn get_distance_metric_internal(&self) -> DistanceMetric {
-        self.distance_metric
-    }
-
-    /// Interne Methode, um minkowski_p zu erhalten (für SDOclust)
-    pub(crate) fn get_minkowski_p_internal(&self) -> Option<f64> {
-        self.minkowski_p
-    }
-
     pub(crate) fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
         compute_distance(a, b, self.distance_metric, self.minkowski_p)
-    }
-
-    /// Interne Methode, um Observer-observations zu aktualisieren (für SDOstream)
-    #[allow(dead_code)]
-    pub(crate) fn update_observer_observations(
-        &mut self,
-        index: usize,
-        new_observations: f64,
-    ) -> bool {
-        self.observers.update_observations(index, new_observations)
-    }
-
-    /// Interne Methode, um Observer-observations und age zu aktualisieren (für SDOstream)
-    #[allow(dead_code)]
-    pub(crate) fn update_observer_age(&mut self, index: usize, new_age: f64) -> bool {
-        self.observers.update_age(index, new_age)
-    }
-
-    /// Interne Methode, um den schlechtesten Observer nach normalisiertem Score zu finden (für SDOstream)
-    pub(crate) fn find_worst_normalized_score(&self) -> Option<(usize, f64)> {
-        // Verwende die optimierte find_worst_normalized_score Methode - O(1)
-        self.observers.find_worst_normalized_score()
-    }
-
-    /// Interne Methode, um alle aktiven Observer-Indizes zu erhalten (für SDOstream)
-    /// Effizienter als get_active_observers_with_indices, wenn nur Indizes benötigt werden
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub(crate) fn get_active_observer_indices(&self) -> Vec<usize> {
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        self.observers
-            .iter_active(num_active)
-            .map(|obs| obs.index)
-            .collect()
-    }
-
-    /// Interne Methode, um aktive Observer zu iterieren ohne Kopie (für SDOstream)
-    /// Effizienter als get_active_observers_with_indices, wenn nur gelesen wird
-    pub(crate) fn iter_active_observers(&self) -> impl Iterator<Item = &Observer> {
-        let num_active = ((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize;
-        let num_active = num_active.max(1).min(self.observers.len());
-        self.observers.iter_active(num_active)
     }
 
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)

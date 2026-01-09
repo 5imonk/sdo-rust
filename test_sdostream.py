@@ -24,8 +24,9 @@ def test_basic_streaming():
     print(f"Initialisierungsdaten: {init_data.shape[0]} Punkte, {init_data.shape[1]} Dimensionen")
     
     params = SDOstreamParams(k=5, x=3, t=10.0)
-    sdostream.initialize(init_data, params)
-    print(f"✓ Modell initialisiert mit {sdostream.n_observers()} Observern")
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(init_data)
+    print(f"✓ Modell initialisiert")
     
     # Streaming: Verarbeite einzelne Punkte
     print("\nStreaming-Verarbeitung:")
@@ -44,7 +45,7 @@ def test_basic_streaming():
         score_before = sdostream.predict(point_2d)
         
         # Verarbeite Punkt
-        sdostream.learn(point_2d, params)
+        sdostream.learn(point_2d)
         
         # Score nach Verarbeitung
         score_after = sdostream.predict(point_2d)
@@ -52,7 +53,7 @@ def test_basic_streaming():
         print(f"  {label:8}: [{point[0]:5.1f}, {point[1]:5.1f}] "
               f"→ Score: {score_before:.4f} → {score_after:.4f}")
     
-    print(f"\nFinale Anzahl Observer: {sdostream.n_observers()}")
+    print(f"\nFinale Anzahl Observer: {sdostream.x}")
     print("\n✓ Test 1 erfolgreich abgeschlossen\n")
 
 
@@ -72,7 +73,8 @@ def test_fading_parameter():
     for t in t_values:
         sdostream = SDOstream()
         params = SDOstreamParams(k=3, x=2, t=t)
-        sdostream.initialize(init_data, params)
+        sdostream.initialize(params)
+        sdostream.initialize_with_data(init_data)
         
         # Verarbeite mehrere identische Punkte
         point = np.array([[10.0, 10.0]], dtype=np.float64)
@@ -80,7 +82,7 @@ def test_fading_parameter():
         scores = []
         for _ in range(5):
             score = sdostream.predict(point)
-            sdostream.learn(point, params)
+            sdostream.learn(point)
             scores.append(score)
         
         print(f"  T={t:5.1f}: Scores = {[f'{s:.4f}' for s in scores]}")
@@ -99,17 +101,18 @@ def test_observer_replacement():
     # Initialisiere mit wenigen Observern
     init_data = np.array([[1.0, 1.0], [2.0, 2.0]], dtype=np.float64)
     params = SDOstreamParams(k=2, x=1, t=5.0)  # Kleines T für häufigeres Sampling
-    sdostream.initialize(init_data, params)
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(init_data)
     
-    print(f"Initial: {sdostream.n_observers()} Observer")
+    print(f"Initial: {sdostream.x} Observer")
     
     # Verarbeite viele Punkte (sollte Observer ersetzen)
     np.random.seed(42)
     for i in range(20):
         point = np.random.randn(1, 2).astype(np.float64) * 2 + np.array([5.0, 5.0])
-        sdostream.learn(point, params)
+        sdostream.learn(point)
     
-    print(f"Nach 20 Streaming-Punkten: {sdostream.n_observers()} Observer")
+    print(f"Nach 20 Streaming-Punkten: {sdostream.x} Observer")
     print("✓ Observer-Anzahl bleibt konstant (k=2)")
     
     print("\n✓ Test 3 erfolgreich abgeschlossen\n")
@@ -129,14 +132,16 @@ def test_streaming_vs_batch():
     # Batch: Initialisiere mit allen Daten
     sdostream_batch = SDOstream()
     params = SDOstreamParams(k=10, x=5, t=10.0)
-    sdostream_batch.initialize(batch_data, params)
+    sdostream_batch.initialize(params)
+    sdostream_batch.initialize_with_data(batch_data)
     
     # Streaming: Initialisiere mit ersten 10, dann einzeln verarbeiten
     sdostream_stream = SDOstream()
-    sdostream_stream.initialize(batch_data[:10], params)
+    sdostream_stream.initialize(params)
+    sdostream_stream.initialize_with_data(batch_data[:10])
     for point in batch_data[10:]:
         point_2d = point.reshape(1, -1)
-        sdostream_stream.learn(point_2d, params)
+        sdostream_stream.learn(point_2d)
     
     # Teste auf gleichem Punkt
     test_point = np.array([[15.0, 15.0]], dtype=np.float64)
@@ -175,12 +180,13 @@ def test_different_parameters():
             x=params_dict["x"],
             t=params_dict["t"],
         )
-        sdostream.initialize(init_data, params)
+        sdostream.initialize(params)
+        sdostream.initialize_with_data(init_data)
         
         # Verarbeite einige Punkte
         for _ in range(5):
             point = np.array([[5.0, 5.0]], dtype=np.float64)
-            sdostream.learn(point, params)
+            sdostream.learn(point)
         
         score = sdostream.predict(test_point)
         
@@ -202,7 +208,8 @@ def test_edge_cases():
     empty_data = np.array([[]], dtype=np.float64).reshape(0, 2)
     try:
         params = SDOstreamParams(k=5, x=3, t=10.0)
-        sdostream.initialize(empty_data, params)
+        sdostream.initialize(params)
+        sdostream.initialize_with_data(empty_data)
         print("  ✓ Leere Daten werden korrekt behandelt")
     except Exception as e:
         print(f"  ✗ Fehler: {e}")
@@ -212,20 +219,22 @@ def test_edge_cases():
     single_point = np.array([[1.0, 2.0]], dtype=np.float64)
     sdostream = SDOstream()
     params = SDOstreamParams(k=1, x=1, t=10.0)
-    sdostream.initialize(single_point, params)
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(single_point)
     score = sdostream.predict(single_point)
-    print(f"  ✓ Einzelner Punkt: Score = {score:.4f}, Observer = {sdostream.n_observers()}")
+    print(f"  ✓ Einzelner Punkt: Score = {score:.4f}, Observer = {sdostream.x}")
     
     # Test 3: Sehr wenige Daten
     print("\nTest 6.3: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0]], dtype=np.float64)
     sdostream = SDOstream()
     params = SDOstreamParams(k=2, x=1, t=10.0)
-    sdostream.initialize(few_data, params)
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(few_data)
     
     # Verarbeite neuen Punkt
     new_point = np.array([[10.0, 10.0]], dtype=np.float64)
-    sdostream.learn(new_point, params)
+    sdostream.learn(new_point)
     score = sdostream.predict(new_point)
     print(f"  ✓ Wenige Daten: Score = {score:.4f}")
     
@@ -234,7 +243,8 @@ def test_edge_cases():
     data_1d = np.array([[1.0], [2.0], [3.0]], dtype=np.float64)
     sdostream = SDOstream()
     params = SDOstreamParams(k=2, x=2, t=10.0)
-    sdostream.initialize(data_1d, params)
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(data_1d)
     point_1d = np.array([[5.0]], dtype=np.float64)
     score = sdostream.predict(point_1d)
     print(f"  ✓ 1D-Daten: Score = {score:.4f}")
@@ -254,9 +264,10 @@ def test_long_stream():
     np.random.seed(42)
     init_data = np.random.randn(10, 2).astype(np.float64)
     params = SDOstreamParams(k=10, x=5, t=10.0)
-    sdostream.initialize(init_data, params)
+    sdostream.initialize(params)
+    sdostream.initialize_with_data(init_data)
     
-    print(f"Initial: {sdostream.n_observers()} Observer")
+    print(f"Initial: {sdostream.x} Observer")
     
     # Verarbeite viele Punkte
     n_points = 100
@@ -266,13 +277,13 @@ def test_long_stream():
     for i in range(n_points):
         point = np.random.randn(1, 2).astype(np.float64) * 2 + np.array([3.0, 3.0])
         score = sdostream.predict(point)
-        sdostream.learn(point, params)
+        sdostream.learn(point)
         scores.append(score)
         
         if (i + 1) % 20 == 0:
-            print(f"  Punkt {i+1:3d}: Score = {score:.4f}, Observer = {sdostream.n_observers()}")
+            print(f"  Punkt {i+1:3d}: Score = {score:.4f}, Observer = {sdostream.x}")
     
-    print(f"\nFinal: {sdostream.n_observers()} Observer")
+    print(f"\nFinal: {sdostream.x} Observer")
     print(f"Score-Statistik: Mean = {np.mean(scores):.4f}, "
           f"Std = {np.std(scores):.4f}, "
           f"Min = {np.min(scores):.4f}, "
