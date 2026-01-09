@@ -82,6 +82,8 @@ pub struct SDOstream {
     data_points_processed: usize, // Zähler für Sampling
     k: usize,                     // Anzahl der Observer (Modellgröße)
     t: f64,                       // T-Parameter für fading
+    rho: f64,                     // Rho-Parameter (für num_active Berechnung)
+    use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
 }
 
 #[pymethods]
@@ -95,13 +97,33 @@ impl SDOstream {
             data_points_processed: 0,
             k: 100,
             t: 100.0,
+            rho: 0.1,
+            use_explicit_time: false, // Default: auto-increment
         }
     }
 
-    /// Initialisiert das Modell mit Parametern und einem leeren ObserverSet
-    pub fn initialize(&mut self, params: &SDOstreamParams) -> PyResult<()> {
+    /// Initialisiert das Modell mit Parametern
+    /// Kann optional mit einem Datensatz oder zufälligen Punkten initialisiert werden
+    /// Wenn time nicht angegeben, wird time=0 verwendet
+    ///
+    /// Verwendung:
+    /// - initialize(params) - nur Parameter setzen (auto-increment Zeit)
+    /// - initialize(params, data=data, time=time) - mit Datensatz
+    ///   - Wenn time angegeben: erwartet learn() time-Parameter für jeden Punkt
+    ///   - Wenn time nicht angegeben: verwendet auto-increment (Zähler)
+    /// - initialize(params, dimension, time=time) - mit zufälligen Punkten
+    #[pyo3(signature = (params, dimension = None, *, data = None, time = None))]
+    pub fn initialize(
+        &mut self,
+        params: &SDOstreamParams,
+        dimension: Option<usize>,
+        data: Option<PyReadonlyArray2<f64>>,
+        time: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<()> {
+        // Setze Parameter
         self.k = params.k;
         self.t = params.t;
+        self.rho = params.rho;
 
         // Initialisiere Streaming-spezifische Parameter
         self.fading = params.get_fading();
@@ -110,6 +132,98 @@ impl SDOstream {
         // Initialisiere SDO mit Parametern
         let sdo_params = params.to_sdo_params();
         self.sdo.initialize(&sdo_params)?;
+
+        // Entscheide Zeit-Strategie: Wenn time bei Initialisierung angegeben, erwarte time bei learn()
+        // Sonst verwende auto-increment basierend auf data_points_processed
+        self.use_explicit_time = time.is_some();
+
+        // Prüfe, ob sowohl data als auch dimension gegeben sind (Fehler)
+        if data.is_some() && dimension.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Entweder 'data' oder 'dimension' muss angegeben werden, nicht beide",
+            ));
+        }
+
+        // Prüfe, ob data oder dimension gegeben ist
+        if let Some(data_array) = data {
+            // Verwende SDO's learn-Methode für das initiale Training
+            // time wird direkt an learn() übergeben (wird auf t0 gesetzt wenn angegeben)
+            self.sdo.learn(data_array, time)?;
+        } else if let Some(dim) = dimension {
+            // Initialisierung mit zufälligen normalverteilten Punkten
+            if dim == 0 || self.k == 0 {
+                return Ok(());
+            }
+
+            // Bestimme Zeit für alle Punkte
+            let t0 = if let Some(time_array) = &time {
+                let time_slice = time_array.as_array();
+                if time_slice.len() != 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Zeit muss ein 1D-Array mit einem Wert sein",
+                    ));
+                }
+                time_slice[[0]]
+            } else {
+                0.0 // Default: time = 0
+            };
+
+            // Generiere k normalverteilte Punkte mit Box-Muller Transformation
+            let mut random_data_normal: Vec<Vec<f64>> = Vec::new();
+            let mut rng = thread_rng();
+            for _ in 0..self.k {
+                let mut point: Vec<f64> = Vec::new();
+                let mut i = 0;
+                while i < dim {
+                    if i + 1 < dim {
+                        // Box-Muller: generiere zwei normalverteilte Werte
+                        let u1: f64 = rng.gen();
+                        let u2: f64 = rng.gen();
+                        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                        let z1 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).sin();
+                        point.push(z0);
+                        point.push(z1);
+                        i += 2;
+                    } else {
+                        // Letzte Dimension: generiere einen normalverteilten Wert
+                        let u1: f64 = rng.gen();
+                        let u2: f64 = rng.gen();
+                        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                        point.push(z0);
+                        i += 1;
+                    }
+                }
+                random_data_normal.push(point);
+            }
+
+            // Hole distance_metric und minkowski_p aus ObserverSet (wurden oben gesetzt)
+            let distance_metric = self.sdo.observers.get_distance_metric();
+            let minkowski_p = self.sdo.observers.get_minkowski_p();
+
+            // Erstelle ObserverSet mit zufälligen Punkten
+            self.sdo.observers = crate::observer::ObserverSet::new();
+            self.sdo
+                .observers
+                .set_tree_params(distance_metric, minkowski_p);
+
+            for (idx, point_data) in random_data_normal.iter().enumerate() {
+                let observer = crate::observer::Observer {
+                    data: point_data.clone(),
+                    observations: 1.0, // Start mit 1 observation
+                    time: t0,
+                    age: 1.0,
+                    index: idx,
+                    label: None,
+                };
+                self.sdo.observers.insert(observer);
+            }
+
+            // Setze num_active basierend auf rho
+            self.sdo.observers.set_num_active(
+                ((self.sdo.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize,
+            );
+        }
+        // Wenn weder data noch dimension gegeben ist, bleibt ObserverSet leer (nur Parameter gesetzt)
 
         Ok(())
     }
@@ -132,24 +246,34 @@ impl SDOstream {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        // Wenn time nicht angegeben, verwende auto-increment basierend auf data_points_processed
-        let time_was_provided = time.is_some();
-        let current_time = if let Some(time_array) = time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() != 1 {
+        // Bestimme Zeit basierend auf Initialisierungs-Strategie
+        let current_time = if self.use_explicit_time {
+            // Erwarte time-Parameter wenn bei Initialisierung time angegeben wurde
+            if let Some(time_array) = time {
+                let time_slice = time_array.as_array();
+                if time_slice.len() != 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Zeit muss ein 1D-Array mit einem Wert sein",
+                    ));
+                }
+                time_slice[[0]]
+            } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Zeit muss ein 1D-Array mit einem Wert sein",
+                    "time-Parameter ist erforderlich (wurde bei Initialisierung mit time initialisiert)",
                 ));
             }
-            time_slice[[0]]
         } else {
             // Auto-increment: verwende data_points_processed als Zeit
-            self.data_points_processed as f64
+            // Ignoriere time-Parameter wenn gegeben (aber nicht erforderlich)
+            (self.data_points_processed + 1) as f64
         };
 
         // Schritt 1: Finde x-nächste Observer (verwende SDO's Tree)
         let x = self.sdo.x;
-        let nearest_observer_indices = self.find_x_nearest_observers(&point_vec, x)?;
+        let nearest_observer_indices = self
+            .sdo
+            .observers
+            .search_k_nearest_indices(&point_vec, x, false);
 
         // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
         // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
@@ -159,11 +283,10 @@ impl SDOstream {
             current_time,
         );
 
+        // Increment data_points_processed für auto-increment Modus
+        self.data_points_processed += 1;
+
         // Schritt 3: Sampling - ersetze Observer basierend auf normalisierter Qualität
-        // Increment data_points_processed nur wenn time nicht explizit angegeben wurde
-        if !time_was_provided {
-            self.data_points_processed += 1;
-        }
         if self.should_sample() {
             self.replace_observer(&point_vec, current_time)?;
         }
@@ -178,7 +301,7 @@ impl SDOstream {
         self.sdo.predict(point)
     }
 
-    /// Gibt x zurück (für Kompatibilität)
+    /// Gibt x zurück (Anzahl der nächsten Nachbarn)
     #[getter]
     pub fn x(&self) -> usize {
         self.sdo.x
@@ -186,26 +309,6 @@ impl SDOstream {
 }
 
 impl SDOstream {
-    fn find_x_nearest_observers(&self, point: &[f64], x: usize) -> PyResult<Vec<usize>> {
-        let observers = self.sdo.observers.get_observers(true);
-        if observers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Verwende SDO's compute_distance für Brute-Force Suche
-        // (kann später mit Tree optimiert werden)
-        let mut distances: Vec<(usize, f64)> = observers
-            .iter()
-            .map(|obs| {
-                let dist = self.sdo.compute_distance(point, &obs.data);
-                (obs.index, dist)
-            })
-            .collect();
-
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        Ok(distances.into_iter().take(x).map(|(idx, _)| idx).collect())
-    }
-
     /// Prüft, ob ein Observer ersetzt werden sollte basierend auf Sampling-Rate
     fn should_sample(&self) -> bool {
         if self.sampling_rate <= 0.0 {
@@ -229,10 +332,10 @@ impl SDOstream {
         // Da wir hier keine Zeit haben, verwenden wir 0.0 (wird beim nächsten Update korrigiert)
         let new_observer = Observer {
             data: new_point.to_vec(),
-            observations: 1.0,  // Neuer Observer startet mit Pω = 0
+            observations: 1.0,  // Neuer Observer startet mit Pω = 1
             time: current_time, // Setze time auf aktuelle Zeit
             age: 1.0,           // Neuer Observer startet mit Hω = 1
-            index: replace_idx, // Verwende den Index des ersetzten Observers
+            index: self.data_points_processed,
             label: None,
         };
 

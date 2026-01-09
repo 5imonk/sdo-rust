@@ -110,7 +110,7 @@ impl SDOclust {
         }
 
         // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
-        self.sdo.learn(data)?;
+        self.sdo.learn(data, None)?;
 
         // Führe Clustering durch
         self.sdo
@@ -143,11 +143,10 @@ impl SDOclust {
             .collect();
 
         // Finde die x nächsten Nachbarn unter den aktiven Observers
-        let x = self.sdo.get_x_internal();
         let nearest_indices = self
             .sdo
             .observers
-            .search_k_nearest_indices(&point_vec, x, true);
+            .search_k_nearest_indices(&point_vec, self.sdo.x, true);
 
         // Zähle die Häufigkeit der Labels
         let mut label_counts: HashMap<i32, usize> = HashMap::new();
@@ -182,10 +181,10 @@ impl SDOclust {
         unique_labels.len()
     }
 
-    /// Gibt x (Anzahl der Nachbarn) zurück
+    /// Gibt x zurück (Anzahl der nächsten Nachbarn)
     #[getter]
     pub fn x(&self) -> usize {
-        self.sdo.get_x_internal()
+        self.sdo.x
     }
 
     /// Gibt die Labels der Observer zurück

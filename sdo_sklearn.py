@@ -95,7 +95,8 @@ class SDOOutlierDetector:
         
         self.sdo_ = SDO()
         params = SDOParams(k=self.k, x=self.x, rho=self.rho)
-        self.sdo_.learn(X, params)
+        self.sdo_.initialize(params)
+        self.sdo_.learn(X)
         
         return self
     

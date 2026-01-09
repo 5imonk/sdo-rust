@@ -136,7 +136,8 @@ class SDOclustClusterer:
             zeta=self.zeta,
             min_cluster_size=self.min_cluster_size,
         )
-        self.sdoclust_.learn(X, params)
+        self.sdoclust_.initialize(params)
+        self.sdoclust_.learn(X)
         
         # Berechne Labels für Trainingsdaten
         self.labels_ = self._predict_batch(X)

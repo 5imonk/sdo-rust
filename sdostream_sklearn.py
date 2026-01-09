@@ -129,7 +129,7 @@ class SDOstreamOutlierDetector:
             minkowski_p=self.minkowski_p,
             tree_type=self.tree_type,
         )
-        self.sdostream_.initialize(X, params)
+        self.sdostream_.initialize(params, data=X)
         
         return self
     
@@ -155,19 +155,10 @@ class SDOstreamOutlierDetector:
         
         X = self._validate_input(X, fit=False)
         
-        params = SDOstreamParams(
-            k=self.k,
-            x=self.x,
-            t=self.t,
-            distance=self.distance,
-            minkowski_p=self.minkowski_p,
-            tree_type=self.tree_type,
-        )
-        
         # Verarbeite jeden Punkt einzeln (Streaming)
         for point in X:
             point_2d = point.reshape(1, -1)
-            self.sdostream_.learn(point_2d, params)
+            self.sdostream_.learn(point_2d)
         
         return self
     
@@ -266,7 +257,7 @@ class SDOstreamOutlierDetector:
         """
         if self.sdostream_ is None:
             raise ValueError("Modell muss zuerst mit fit() initialisiert werden.")
-        return self.sdostream_.n_observers()
+        return self.sdostream_.sdo.x
     
     def _validate_input(self, X, fit=False):
         """

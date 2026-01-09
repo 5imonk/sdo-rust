@@ -1,4 +1,4 @@
-use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -94,7 +94,13 @@ impl SDO {
     }
 
     /// Lernt das Modell aus den Daten
-    pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
+    /// Wenn time angegeben, wird dieser Wert für alle Observer als time gesetzt
+    #[pyo3(signature = (data, *, time = None))]
+    pub fn learn(
+        &mut self,
+        data: PyReadonlyArray2<f64>,
+        time: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<()> {
         let data_slice = data.as_array();
         let rows = data_slice.nrows();
         let cols = data_slice.ncols();
@@ -103,10 +109,29 @@ impl SDO {
             return Ok(());
         }
 
+        if rows < self.k {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Anzahl der Datenpunkte muss mindestens k sein",
+            ));
+        }
+
         // Konvertiere NumPy-Array zu Vec<Vec<f64>>
         let data_vec: Vec<Vec<f64>> = (0..rows)
             .map(|i| (0..cols).map(|j| data_slice[[i, j]]).collect())
             .collect();
+
+        // Bestimme Zeit für alle Punkte
+        let t0 = if let Some(time_array) = &time {
+            let time_slice = time_array.as_array();
+            if time_slice.len() != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Zeit muss ein 1D-Array mit einem Wert sein",
+                ));
+            }
+            time_slice[[0]]
+        } else {
+            0.0 // Default: time = 0
+        };
 
         // Schritt 1: Sample
         let mut rng = thread_rng();
@@ -124,8 +149,8 @@ impl SDO {
             let observer = Observer {
                 data: observer_data.clone(),
                 observations: 0.0,
-                time: 0.0,
-                age: 1.0,
+                time: t0,
+                age: rows as f64,
                 index: idx,
                 label: None,
             };
@@ -220,11 +245,6 @@ impl SDO {
 }
 
 impl SDO {
-    /// Interne Methode, um x zu erhalten (für SDOclust)
-    pub(crate) fn get_x_internal(&self) -> usize {
-        self.x
-    }
-
     pub(crate) fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
         compute_distance(a, b, self.distance_metric, self.minkowski_p)
     }
