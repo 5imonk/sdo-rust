@@ -3,8 +3,21 @@
 Vollständiges Testskript für das SDO (Sparse Data Observers) Python-Modul
 """
 
+import sys
+import os
+
+# Add paths for sdo module
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append('/home/simon/sdo/.venv/lib/python3.12/site-packages')
+
+try:
+    from sdo import SDO
+except ImportError:
+    print("Fehler: Das 'sdo' Modul konnte nicht importiert werden.")
+    print("Bitte installieren Sie das Modul mit 'maturin develop' oder 'pip install .'")
+    sys.exit(1)
+
 import numpy as np
-from sdo import SDO, SDOParams
 
 def test_basic_usage():
     """Grundlegende Verwendung des SDO-Algorithmus"""
@@ -12,8 +25,8 @@ def test_basic_usage():
     print("Test 1: Grundlegende Verwendung")
     print("=" * 60)
     
-    # Erstelle SDO-Instanz
-    sdo = SDO()
+    # Erstelle SDO-Instanz mit Parametern
+    sdo = SDO(k=8, x=3, rho=0.2)
     
     # Trainingsdaten (2D-Daten mit normalen Punkten und einem Outlier)
     data = np.array([
@@ -37,9 +50,7 @@ def test_basic_usage():
     print(f"Trainingsdaten: {data.shape[0]} Punkte, {data.shape[1]} Dimensionen")
     print("Lerne SDO-Modell...")
     
-    # Lerne das Modell: k=8 Observer, x=3 Nachbarn, rho=0.2 (behalte 80% der Observer)
-    params = SDOParams(k=8, x=3, rho=0.2)
-    sdo.initialize(params)
+    # Lerne das Modell
     sdo.learn(data)
     print(f"✓ Modell trainiert")
     print(f"  - Anzahl aktiver Observer: {sdo.x}")
@@ -105,9 +116,7 @@ def test_larger_dataset():
     print(f"  - Outlier: {len(outlier_data)}")
     
     # Lerne mit größerem Datensatz
-    sdo = SDO()
-    params = SDOParams(k=20, x=5, rho=0.3)
-    sdo.initialize(params)
+    sdo = SDO(k=20, x=5, rho=0.3)
     sdo.learn(all_data)
     print(f"✓ Modell trainiert mit {sdo.x} aktiven Observern")
     
@@ -167,9 +176,7 @@ def test_different_parameters():
     print("\nVergleich verschiedener Parameter:")
     
     for params in param_sets:
-        sdo = SDO()
-        sdo_params = SDOParams(k=params["k"], x=params["x"], rho=params["rho"])
-        sdo.initialize(sdo_params)
+        sdo = SDO(k=params["k"], x=params["x"], rho=params["rho"])
         sdo.learn(all_data)
         score = sdo.predict(test_point)
         
@@ -187,11 +194,9 @@ def test_edge_cases():
     
     # Test 1: Leere Daten
     print("Test 4.1: Leere Daten")
-    sdo = SDO()
     empty_data = np.array([[]], dtype=np.float64).reshape(0, 2)
     try:
-        params = SDOParams(k=5, x=3, rho=0.2)
-        sdo.initialize(params)
+        sdo = SDO(k=5, x=3, rho=0.2)
         sdo.learn(empty_data)
         print("  ✓ Leere Daten werden korrekt behandelt")
     except Exception as e:
@@ -200,9 +205,7 @@ def test_edge_cases():
     # Test 2: Einzelner Datenpunkt
     print("\nTest 4.2: Einzelner Datenpunkt")
     single_point = np.array([[1.0, 2.0]], dtype=np.float64)
-    sdo = SDO()
-    params = SDOParams(k=1, x=1, rho=0.0)
-    sdo.initialize(params)
+    sdo = SDO(k=1, x=1, rho=0.0)
     sdo.learn(single_point)
     score = sdo.predict(single_point)
     print(f"  ✓ Einzelner Punkt: Score = {score:.4f}")
@@ -210,9 +213,7 @@ def test_edge_cases():
     # Test 3: Sehr wenige Daten
     print("\nTest 4.3: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float64)
-    sdo = SDO()
-    params = SDOParams(k=2, x=1, rho=0.1)
-    sdo.initialize(params)
+    sdo = SDO(k=2, x=1, rho=0.1)
     sdo.learn(few_data)
     test_point = np.array([[10.0, 10.0]], dtype=np.float64)
     score = sdo.predict(test_point)
@@ -221,9 +222,7 @@ def test_edge_cases():
     # Test 4: 1D-Daten (wird zu 2D konvertiert)
     print("\nTest 4.4: 1D-Daten")
     data_1d = np.array([[1.0], [2.0], [3.0], [10.0]], dtype=np.float64)
-    sdo = SDO()
-    params = SDOParams(k=2, x=2, rho=0.2)
-    sdo.initialize(params)
+    sdo = SDO(k=2, x=2, rho=0.2)
     sdo.learn(data_1d)
     point_1d = np.array([[5.0]], dtype=np.float64)
     score = sdo.predict(point_1d)
@@ -249,10 +248,8 @@ def test_performance():
         data = np.random.randn(size, 2).astype(np.float64)
         
         # Training
-        sdo = SDO()
         start = time.time()
-        params = SDOParams(k=min(50, size//10), x=5, rho=0.2)
-        sdo.initialize(params)
+        sdo = SDO(k=min(50, size//10), x=5, rho=0.2)
         sdo.learn(data)
         train_time = time.time() - start
         
@@ -288,9 +285,7 @@ def test_3d_data():
     
     print(f"3D-Daten: {all_data.shape[0]} Punkte, {all_data.shape[1]} Dimensionen")
     
-    sdo = SDO()
-    params = SDOParams(k=15, x=5, rho=0.2)
-    sdo.initialize(params)
+    sdo = SDO(k=15, x=5, rho=0.2)
     sdo.learn(all_data)
     print(f"✓ Modell trainiert")
     

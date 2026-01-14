@@ -61,6 +61,27 @@ pub struct Observer {
     pub cluster_observations: Vec<f64>,
 }
 
+impl Observer {
+    /// Gibt den normalisierten Cluster-Score für diesen Observer zurück
+    /// Normalisiert den Lω Vektor so dass die Summe = 1 (leerer Vektor -> leere HashMap)
+    pub fn get_normalized_cluster_score(&self) -> HashMap<i32, f64> {
+        let mut normalized_scores: HashMap<i32, f64> = HashMap::new();
+
+        if !self.cluster_observations.is_empty() {
+            let sum: f64 = self.cluster_observations.iter().sum();
+            if sum > 0.0 {
+                for (label_idx, &value) in self.cluster_observations.iter().enumerate() {
+                    let label = label_idx as i32;
+                    let normalized_value = value / sum;
+                    normalized_scores.insert(label, normalized_value);
+                }
+            }
+        }
+
+        normalized_scores
+    }
+}
+
 // Helper struct for comparing floats in collections
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OrderedFloat(pub(crate) f64);
@@ -203,6 +224,9 @@ pub struct ObserverSet {
 
     // Letzte Zeit für Cluster-Beobachtungs-Fading (für SDOstreamclust)
     pub(crate) last_cluster_time: f64,
+
+    // Flag: Wenn true, wird immer Brute-Force statt Spatial Tree verwendet
+    use_brute_force: bool,
 }
 
 impl ObserverSet {
@@ -219,6 +243,21 @@ impl ObserverSet {
             last_active_observer: None,
             distance_lists: HashMap::new(),
             last_cluster_time: 0.0,
+            use_brute_force: false,
+        }
+    }
+
+    /// Setze use_brute_force Flag
+    pub fn set_use_brute_force(&mut self, use_brute_force: bool) {
+        self.use_brute_force = use_brute_force;
+        // Invalidiere Bäume wenn Brute-Force aktiviert wird
+        if use_brute_force {
+            if let Ok(mut tree_opt) = self.spatial_tree.try_borrow_mut() {
+                *tree_opt = None;
+            }
+            if let Ok(mut tree_opt) = self.spatial_tree_active.try_borrow_mut() {
+                *tree_opt = None;
+            }
         }
     }
 
@@ -761,6 +800,11 @@ impl ObserverSet {
         k: usize,
         active: bool,
     ) -> Vec<f64> {
+        // Wenn use_brute_force gesetzt ist, verwende immer Brute-Force
+        if self.use_brute_force {
+            return self.brute_force_k_nearest(query_point, k, active);
+        }
+
         match self.distance_metric {
             DistanceMetric::Euclidean => {
                 // Verwende kiddo KD-Tree für euklidische Distanz
@@ -838,6 +882,32 @@ impl ObserverSet {
         k: usize,
         active: bool,
     ) -> Vec<usize> {
+        // Wenn use_brute_force gesetzt ist, verwende immer Brute-Force
+        if self.use_brute_force {
+            let mut observer_distances: Vec<(usize, f64)> = self
+                .iter_observers(active)
+                .map(|obs| {
+                    (
+                        obs.index,
+                        compute_distance(
+                            &obs.data,
+                            query_point,
+                            self.distance_metric,
+                            self.minkowski_p,
+                        ),
+                    )
+                })
+                .collect();
+
+            observer_distances
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            return observer_distances
+                .iter()
+                .take(k)
+                .map(|(idx, _)| *idx)
+                .collect();
+        }
+
         if self.distance_metric == DistanceMetric::Euclidean {
             // Verwende kiddo KD-Tree für euklidische Distanz
             self.ensure_spatial_tree(active);

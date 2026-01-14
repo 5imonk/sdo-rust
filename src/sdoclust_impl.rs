@@ -3,57 +3,7 @@ use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
-use crate::sdo_impl::{SDOParams, SDO};
-
-/// Parameter-Struktur für SDOclust
-#[pyclass]
-#[derive(Clone)]
-pub struct SDOclustParams {
-    #[pyo3(get, set)]
-    pub k: usize,
-    #[pyo3(get, set)]
-    pub x: usize,
-    #[pyo3(get, set)]
-    pub rho: f64,
-    #[pyo3(get, set)]
-    pub chi: usize,
-    #[pyo3(get, set)]
-    pub zeta: f64,
-    #[pyo3(get, set)]
-    pub min_cluster_size: usize,
-    #[pyo3(get, set)]
-    pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
-    #[pyo3(get, set)]
-    pub minkowski_p: Option<f64>, // Für Minkowski-Distanz
-}
-
-#[pymethods]
-#[allow(clippy::too_many_arguments)]
-impl SDOclustParams {
-    #[new]
-    #[pyo3(signature = (k, x, rho, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None))]
-    pub fn new(
-        k: usize,
-        x: usize,
-        rho: f64,
-        chi: usize,
-        zeta: f64,
-        min_cluster_size: usize,
-        distance: String,
-        minkowski_p: Option<f64>,
-    ) -> Self {
-        Self {
-            k,
-            x,
-            rho,
-            chi,
-            zeta,
-            min_cluster_size,
-            distance,
-            minkowski_p,
-        }
-    }
-}
+use crate::sdo_impl::SDO;
 
 /// Sparse Data Observers Clustering (SDOclust) Algorithm
 #[pyclass]
@@ -69,35 +19,28 @@ pub struct SDOclust {
 }
 
 #[pymethods]
+#[allow(clippy::too_many_arguments)]
 impl SDOclust {
     #[new]
-    pub fn new() -> Self {
+    #[pyo3(signature = (k, x, rho, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, use_brute_force = false))]
+    pub fn new(
+        k: usize,
+        x: usize,
+        rho: f64,
+        chi: usize,
+        zeta: f64,
+        min_cluster_size: usize,
+        distance: String,
+        minkowski_p: Option<f64>,
+        use_brute_force: bool,
+    ) -> Self {
         Self {
-            sdo: SDO::new(),
-            chi: 4,
-            zeta: 0.5,
-            min_cluster_size: 2,
-            k: 100,
+            sdo: SDO::new(k, x, rho, distance, minkowski_p, use_brute_force),
+            chi,
+            zeta,
+            min_cluster_size,
+            k,
         }
-    }
-
-    /// Initialisiert das Modell mit Parametern und einem leeren ObserverSet
-    pub fn initialize(&mut self, params: &SDOclustParams) -> PyResult<()> {
-        self.chi = params.chi;
-        self.zeta = params.zeta;
-        self.min_cluster_size = params.min_cluster_size;
-        self.k = params.k;
-
-        // Initialisiere SDO mit Parametern
-        let sdo_params = SDOParams::new(
-            params.k,
-            params.x,
-            params.rho,
-            params.distance.clone(),
-            params.minkowski_p,
-        );
-        self.sdo.initialize(&sdo_params)?;
-        Ok(())
     }
 
     /// Lernt das Modell aus den Daten und führt Clustering durch
@@ -205,6 +148,6 @@ impl SDOclust {
 
 impl Default for SDOclust {
     fn default() -> Self {
-        Self::new()
+        Self::new(10, 5, 0.2, 4, 0.5, 2, "euclidean".to_string(), None, false)
     }
 }

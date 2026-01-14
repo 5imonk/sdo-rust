@@ -4,7 +4,7 @@ Erweiterte Beispiele für die Verwendung von SDO, SDOclust und SDOstream
 """
 
 import numpy as np
-from sdo import SDO, SDOParams, SDOclust, SDOclustParams, SDOstream, SDOstreamParams
+from sdo import SDO, SDOclust, SDOstream
 
 
 def example_sdo():
@@ -12,9 +12,6 @@ def example_sdo():
     print("=" * 70)
     print("Beispiel 1: SDO (Sparse Data Observers) - Outlier Detection")
     print("=" * 70)
-    
-    # Erstelle SDO-Instanz
-    sdo = SDO()
     
     # Generiere Beispiel-Daten mit normalen Punkten und Outliern
     np.random.seed(42)
@@ -32,8 +29,7 @@ def example_sdo():
     
     # Trainiere das Modell
     print("\nTrainiere SDO-Modell...")
-    params = SDOParams(k=20, x=5, rho=0.2)
-    sdo.initialize(params)
+    sdo = SDO(k=20, x=5, rho=0.2)
     sdo.learn(data)
     print(f"✓ Fertig! {sdo.x} aktive Observer")
     
@@ -79,9 +75,6 @@ def example_sdoclust():
     print("Beispiel 2: SDOclust (Sparse Data Observers Clustering)")
     print("=" * 70)
     
-    # Erstelle SDOclust-Instanz
-    sdoclust = SDOclust()
-    
     # Erstelle Daten mit zwei klar getrennten Clustern
     np.random.seed(42)
     cluster1 = np.random.randn(30, 2) * 0.5 + np.array([2.0, 2.0])
@@ -94,8 +87,7 @@ def example_sdoclust():
     
     # Trainiere das Modell
     print("\nTrainiere SDOclust-Modell...")
-    params = SDOclustParams(k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
     print(f"✓ Fertig! {sdoclust.n_clusters()} Cluster gefunden")
     
@@ -146,9 +138,6 @@ def example_sdostream():
     print("Beispiel 3: SDOstream (Sparse Data Observers Streaming)")
     print("=" * 70)
     
-    # Erstelle SDOstream-Instanz
-    sdostream = SDOstream()
-    
     # Initialisiere mit Daten
     np.random.seed(42)
     init_data = np.random.randn(10, 2) * 1.0 + np.array([3.0, 3.0])
@@ -156,11 +145,10 @@ def example_sdostream():
     
     print(f"\nInitialisierungsdaten: {init_data.shape[0]} Punkte")
     
-    params = SDOstreamParams(k=10, x=5, t_fading=10.0, t_sampling=10.0)
-    sdostream.initialize(params, data=init_data)
+    sdostream = SDOstream(k=10, x=5, t_fading=10.0, data=init_data)
     print(f"✓ Modell initialisiert mit {sdostream.sdo.x} Observern")
-    print(f"  Fading-Parameter f = exp(-1/T_fading) = {np.exp(-1.0/params.t_fading):.4f}")
-    print(f"  Sampling-Rate T_sampling = {params.t_sampling:.2f}")
+    print(f"  Fading-Parameter f = exp(-1/T_fading) = {np.exp(-1.0/10.0):.4f}")
+    print(f"  Sampling-Rate T_sampling = t_fading/k = {10.0/10:.2f} (automatisch berechnet)")
     
     # Streaming: Verarbeite einzelne Punkte
     print("\nStreaming-Verarbeitung (ein Punkt nach dem anderen):")
@@ -220,9 +208,7 @@ def example_comparison():
     
     # SDO
     print("\n1. SDO (Outlier Detection):")
-    sdo = SDO()
-    sdo_params = SDOParams(k=15, x=5, rho=0.2)
-    sdo.initialize(sdo_params)
+    sdo = SDO(k=15, x=5, rho=0.2)
     sdo.learn(data)
     sdo_score = sdo.predict(test_point)
     print(f"   Score: {sdo_score:.4f}")
@@ -230,9 +216,7 @@ def example_comparison():
     
     # SDOclust
     print("\n2. SDOclust (Clustering + Outlier Detection):")
-    sdoclust = SDOclust()
-    sdoclust_params = SDOclustParams(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(sdoclust_params)
+    sdoclust = SDOclust(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
     sdoclust_label = sdoclust.predict(test_point)
     sdoclust_score = sdoclust.predict_outlier_score(test_point)
@@ -242,9 +226,7 @@ def example_comparison():
     
     # SDOstream
     print("\n3. SDOstream (Streaming Outlier Detection):")
-    sdostream = SDOstream()
-    sdostream_params = SDOstreamParams(k=15, x=5, t_fading=10.0, t_sampling=10.0)
-    sdostream.initialize(sdostream_params, data=data)
+    sdostream = SDOstream(k=15, x=5, t_fading=10.0, data=data)
     
     # Simuliere Streaming: Verarbeite einige Punkte
     for point in data[::5]:  # Jeden 5. Punkt
@@ -254,7 +236,7 @@ def example_comparison():
     sdostream_score = sdostream.predict(test_point)
     print(f"   Score: {sdostream_score:.4f}")
     print(f"   Anzahl Observer: {sdostream.sdo.x}")
-    print(f"   Fading-Parameter f = {np.exp(-1.0/sdostream_params.t):.4f}")
+    print(f"   Fading-Parameter f = {np.exp(-1.0/10.0):.4f}")
     
     print("\n" + "=" * 70 + "\n")
 
@@ -284,7 +266,7 @@ def example_sklearn_integration():
         
         # SDOstream mit sklearn-API
         print("\n2. SDOstream mit sklearn-API:")
-        stream_detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
+        stream_detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0)
         stream_detector.fit(X[:20])  # Initialisiere mit ersten 20 Punkten
         
         # Streaming

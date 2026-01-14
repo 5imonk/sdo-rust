@@ -8,7 +8,7 @@ integriert werden kann.
 """
 
 import numpy as np
-from sdo import SDO, SDOParams
+from sdo import SDO
 
 
 class SDOOutlierDetector:
@@ -93,9 +93,7 @@ class SDOOutlierDetector:
         """
         X = self._validate_input(X, fit=True)
         
-        self.sdo_ = SDO()
-        params = SDOParams(k=self.k, x=self.x, rho=self.rho)
-        self.sdo_.initialize(params)
+        self.sdo_ = SDO(k=self.k, x=self.x, rho=self.rho)
         self.sdo_.learn(X)
         
         return self

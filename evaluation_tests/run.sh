@@ -1,0 +1,10 @@
+python3 run_comp.py data/example/ results/ plots/ 5
+python3 run_comp.py data/real/ results/ plots/ 5
+python3 run_comp.py data/synthetic/base_clean/ results/ plots/ 1
+python3 run_comp.py data/synthetic/base_normal/ results/ plots/ 1
+python3 run_comp.py data/synthetic/moving_clean/ results/ plots/ 1
+python3 run_comp.py data/synthetic/moving_normal/ results/ plots/ 1
+python3 run_comp.py data/synthetic/nonstat_clean/ results/ plots/ 1
+python3 run_comp.py data/synthetic/nonstat_normal/ results/ plots/ 1
+python3 run_comp.py data/synthetic/sequential_clean/ results/ plots/ 1
+python3 run_comp.py data/synthetic/sequential_normal/ results/ plots/ 1

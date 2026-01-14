@@ -10,21 +10,17 @@ mod utils;
 
 use pyo3::prelude::*;
 
-use sdo_impl::{SDOParams, SDO};
-use sdoclust_impl::{SDOclust, SDOclustParams};
-use sdostream_impl::{SDOstream, SDOstreamParams};
-use sdostreamclust_impl::{SDOstreamclust, SDOstreamclustParams};
+use sdo_impl::SDO;
+use sdoclust_impl::SDOclust;
+use sdostream_impl::SDOstream;
+use sdostreamclust_impl::SDOstreamclust;
 
 /// Python-Modul
 #[pymodule]
 fn sdo(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<SDO>()?;
-    m.add_class::<SDOParams>()?;
     m.add_class::<SDOclust>()?;
-    m.add_class::<SDOclustParams>()?;
     m.add_class::<SDOstream>()?;
-    m.add_class::<SDOstreamParams>()?;
     m.add_class::<SDOstreamclust>()?;
-    m.add_class::<SDOstreamclustParams>()?;
     Ok(())
 }

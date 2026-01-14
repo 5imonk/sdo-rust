@@ -5,6 +5,23 @@ use crate::observer::ObserverSet;
 /// Streaming-Clustering-Erweiterungen für ObserverSet
 /// Enthält Funktionen für Cluster-Formation, Labeling und Lω Updates
 impl ObserverSet {
+    /// Berechnet normalisierte Cluster-Scores für gegebene Observer-Indizes
+    /// Gibt HashMap zurück: label -> normalisierter Score
+    /// Normalisiert jeden Lω Vektor vor der Summierung
+    pub fn get_normalized_cluster_scores(&self, observer_indices: &[usize]) -> HashMap<i32, f64> {
+        let mut label_scores: HashMap<i32, f64> = HashMap::new();
+
+        for &obs_idx in observer_indices {
+            if let Some(observer) = self.get(obs_idx) {
+                let normalized_scores = observer.get_normalized_cluster_score();
+                for (label, &normalized_value) in &normalized_scores {
+                    *label_scores.entry(*label).or_insert(0.0) += normalized_value;
+                }
+            }
+        }
+
+        label_scores
+    }
     /// Weist Labels zu Clustern zu basierend auf historischen Cluster-Beobachtungen (Algorithmus 3.5)
     /// Gibt eine HashMap zurück: cluster_index -> label (i32)
     pub fn label_clusters(&self, clusters: &[HashSet<usize>]) -> HashMap<usize, i32> {
@@ -17,26 +34,10 @@ impl ObserverSet {
             .iter()
             .enumerate()
             .map(|(cluster_idx, cluster_set)| {
-                // Berechne normalisierte Lω Vektoren für alle Observer im Cluster
-                let mut label_scores: HashMap<i32, f64> = HashMap::new();
-
-                for &obs_idx in cluster_set {
-                    if let Some(observer_arc) = self.observers_by_index.get(&obs_idx) {
-                        let l_omega = &observer_arc.cluster_observations;
-                        if l_omega.is_empty() {
-                            continue;
-                        }
-
-                        // Normalisiere Lω (Summe = 1)
-                        let sum: f64 = l_omega.iter().sum();
-                        if sum > 0.0 {
-                            for (label_idx, &value) in l_omega.iter().enumerate() {
-                                let label = label_idx as i32;
-                                *label_scores.entry(label).or_insert(0.0) += value / sum;
-                            }
-                        }
-                    }
-                }
+                // Berechne normalisierte Cluster-Scores für alle Observer im Cluster
+                let label_scores = self.get_normalized_cluster_scores(
+                    &cluster_set.iter().cloned().collect::<Vec<_>>(),
+                );
 
                 // Finde maximalen Score und entsprechendes Label
                 let (candidate_label, max_score) = label_scores

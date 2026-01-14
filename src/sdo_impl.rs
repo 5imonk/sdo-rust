@@ -9,48 +9,6 @@ use crate::utils::DistanceMetric;
 
 // SpatialTreeObserver moved to observer_set.rs (now uses HNSW)
 
-/// Parameter-Struktur für SDO
-#[pyclass]
-#[derive(Clone)]
-pub struct SDOParams {
-    #[pyo3(get, set)]
-    pub k: usize,
-    #[pyo3(get, set)]
-    pub x: usize,
-    #[pyo3(get, set)]
-    pub rho: f64,
-    #[pyo3(get, set)]
-    pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
-    #[pyo3(get, set)]
-    pub minkowski_p: Option<f64>, // Für Minkowski-Distanz
-}
-
-#[pymethods]
-impl SDOParams {
-    #[new]
-    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None))]
-    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>) -> Self {
-        Self {
-            k,
-            x,
-            rho,
-            distance,
-            minkowski_p,
-        }
-    }
-}
-
-impl SDOParams {
-    fn get_metric(&self) -> DistanceMetric {
-        match self.distance.to_lowercase().as_str() {
-            "manhattan" => DistanceMetric::Manhattan,
-            "chebyshev" => DistanceMetric::Chebyshev,
-            "minkowski" => DistanceMetric::Minkowski,
-            _ => DistanceMetric::Euclidean,
-        }
-    }
-}
-
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
 #[allow(clippy::upper_case_acronyms)]
@@ -68,29 +26,25 @@ pub struct SDO {
 #[pymethods]
 impl SDO {
     #[new]
-    pub fn new() -> Self {
-        Self {
-            observers: ObserverSet::new(),
-            distance_metric: DistanceMetric::Euclidean,
-            minkowski_p: None,
-            rho: 0.1,
-            x: 10,
-            k: 100,
-        }
-    }
+    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None, use_brute_force = false))]
+    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>, use_brute_force: bool) -> Self {
+        let distance_metric = match distance.to_lowercase().as_str() {
+            "manhattan" => DistanceMetric::Manhattan,
+            "chebyshev" => DistanceMetric::Chebyshev,
+            "minkowski" => DistanceMetric::Minkowski,
+            _ => DistanceMetric::Euclidean,
+        };
 
-    /// Initialisiert das Modell mit Parametern und einem leeren ObserverSet
-    pub fn initialize(&mut self, params: &SDOParams) -> PyResult<()> {
-        self.x = params.x;
-        self.k = params.k;
-        self.distance_metric = params.get_metric();
-        self.minkowski_p = params.minkowski_p;
-        self.rho = params.rho;
-        // Initialisiere leeres ObserverSet mit Parametern
-        self.observers = ObserverSet::new();
-        self.observers
-            .set_tree_params(self.distance_metric, self.minkowski_p);
-        Ok(())
+        let mut instance = Self {
+            observers: ObserverSet::new(),
+            distance_metric,
+            minkowski_p,
+            rho,
+            x,
+            k,
+        };
+        instance.observers.set_use_brute_force(use_brute_force);
+        instance
     }
 
     /// Lernt das Modell aus den Daten
@@ -254,6 +208,6 @@ impl SDO {
 
 impl Default for SDO {
     fn default() -> Self {
-        Self::new()
+        Self::new(10, 5, 0.2, "euclidean".to_string(), None, false)
     }
 }

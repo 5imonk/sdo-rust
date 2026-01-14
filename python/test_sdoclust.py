@@ -4,16 +4,13 @@ Vollständiges Testskript für SDOclust (Sparse Data Observers Clustering)
 """
 
 import numpy as np
-from sdo import SDOclust, SDOclustParams
+from sdo import SDOclust
 
 def test_basic_clustering():
     """Grundlegende Clustering-Funktionalität"""
     print("=" * 60)
     print("Test 1: Grundlegende Clustering-Funktionalität")
     print("=" * 60)
-    
-    # Erstelle SDOclust-Instanz
-    sdoclust = SDOclust()
     
     # Erstelle Daten mit zwei klar getrennten Clustern
     np.random.seed(42)
@@ -27,8 +24,7 @@ def test_basic_clustering():
     
     # Trainiere das Modell
     print("\nTrainiere SDOclust-Modell...")
-    params = SDOclustParams(k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=20, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
     print(f"✓ Modell trainiert")
     print(f"  - Anzahl Cluster: {sdoclust.n_clusters()}")
@@ -82,9 +78,7 @@ def test_three_clusters():
     
     print(f"Trainingsdaten: {data.shape[0]} Punkte in 3 Clustern")
     
-    sdoclust = SDOclust()
-    params = SDOclustParams(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
     
     print(f"✓ Gefundene Cluster: {sdoclust.n_clusters()}")
@@ -127,8 +121,7 @@ def test_different_parameters():
     
     print("Vergleich verschiedener Parameter:\n")
     for params_dict in param_sets:
-        sdoclust = SDOclust()
-        params = SDOclustParams(
+        sdoclust = SDOclust(
             k=20,
             x=5,
             rho=0.2,
@@ -136,7 +129,6 @@ def test_different_parameters():
             zeta=params_dict["zeta"],
             min_cluster_size=params_dict["min_cluster_size"],
         )
-        sdoclust.initialize(params)
         sdoclust.learn(data)
         
         n_clusters = sdoclust.n_clusters()
@@ -171,9 +163,7 @@ def test_non_convex_clusters():
     
     print(f"Trainingsdaten: {data.shape[0]} Punkte (Spiral + Kreis)")
     
-    sdoclust = SDOclust()
-    params = SDOclustParams(k=40, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=3)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=40, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=3)
     sdoclust.learn(data)
     
     print(f"✓ Gefundene Cluster: {sdoclust.n_clusters()}")
@@ -202,9 +192,7 @@ def test_observer_labels():
     cluster2 = np.random.randn(20, 2) * 0.5 + np.array([8.0, 8.0])
     data = np.vstack([cluster1, cluster2]).astype(np.float64)
     
-    sdoclust = SDOclust()
-    params = SDOclustParams(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
     
     observer_labels = sdoclust.get_observer_labels()
@@ -233,10 +221,8 @@ def test_edge_cases():
     # Test 1: Sehr wenige Daten
     print("Test 6.1: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float64)
-    sdoclust = SDOclust()
+    sdoclust = SDOclust(k=2, x=1, rho=0.1, chi=1, zeta=0.5, min_cluster_size=1)
     try:
-        params = SDOclustParams(k=2, x=1, rho=0.1, chi=1, zeta=0.5, min_cluster_size=1)
-        sdoclust.initialize(params)
         sdoclust.learn(few_data)
         print(f"  ✓ Wenige Daten: {sdoclust.n_clusters()} Cluster")
     except Exception as e:
@@ -246,9 +232,7 @@ def test_edge_cases():
     print("\nTest 6.2: Einzelner kompakter Cluster")
     np.random.seed(42)
     single_cluster = np.random.randn(30, 2) * 0.3 + np.array([5.0, 5.0])
-    sdoclust = SDOclust()
-    params = SDOclustParams(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(single_cluster)
     print(f"  ✓ Einzelner Cluster: {sdoclust.n_clusters()} Cluster gefunden")
     
@@ -256,9 +240,7 @@ def test_edge_cases():
     print("\nTest 6.3: Hoher min_cluster_size")
     np.random.seed(42)
     data = np.random.randn(20, 2).astype(np.float64)
-    sdoclust = SDOclust()
-    params = SDOclustParams(k=10, x=3, rho=0.2, chi=2, zeta=0.5, min_cluster_size=10)
-    sdoclust.initialize(params)
+    sdoclust = SDOclust(k=10, x=3, rho=0.2, chi=2, zeta=0.5, min_cluster_size=10)
     sdoclust.learn(data)
     print(f"  ✓ Hoher min_cluster_size: {sdoclust.n_clusters()} Cluster")
     

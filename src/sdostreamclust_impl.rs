@@ -1,80 +1,8 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::sdostream_impl::{SDOstream, SDOstreamParams};
-
-/// Parameter-Struktur für SDOstreamclust
-/// Erweitert SDOstreamParams um Clustering-Parameter
-#[pyclass]
-#[derive(Clone)]
-pub struct SDOstreamclustParams {
-    #[pyo3(get, set)]
-    pub k: usize,
-    #[pyo3(get, set)]
-    pub x: usize,
-    #[pyo3(get, set)]
-    pub t_fading: f64,
-    #[pyo3(get, set)]
-    pub t_sampling: f64,
-    #[pyo3(get, set)]
-    pub distance: String,
-    #[pyo3(get, set)]
-    pub minkowski_p: Option<f64>,
-    #[pyo3(get, set)]
-    pub rho: f64,
-    #[pyo3(get, set)]
-    pub chi: usize, // Anzahl der nächsten Observer für lokale Thresholds
-    #[pyo3(get, set)]
-    pub zeta: f64, // Mixing-Parameter für globale/lokale Thresholds
-    #[pyo3(get, set)]
-    pub min_cluster_size: usize, // Minimale Clustergröße
-}
-
-#[pymethods]
-#[allow(clippy::too_many_arguments)]
-impl SDOstreamclustParams {
-    #[new]
-    #[pyo3(signature = (k, x, t_fading, t_sampling, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1))]
-    pub fn new(
-        k: usize,
-        x: usize,
-        t_fading: f64,
-        t_sampling: f64,
-        chi: usize,
-        zeta: f64,
-        min_cluster_size: usize,
-        distance: String,
-        minkowski_p: Option<f64>,
-        rho: f64,
-    ) -> Self {
-        Self {
-            k,
-            x,
-            t_fading,
-            t_sampling,
-            distance,
-            minkowski_p,
-            rho,
-            chi,
-            zeta,
-            min_cluster_size,
-        }
-    }
-
-    /// Konvertiert zu SDOstreamParams
-    fn to_sdostream_params(&self) -> SDOstreamParams {
-        SDOstreamParams {
-            k: self.k,
-            x: self.x,
-            t_fading: self.t_fading,
-            t_sampling: self.t_sampling,
-            distance: self.distance.clone(),
-            minkowski_p: self.minkowski_p,
-            rho: self.rho,
-        }
-    }
-}
+use crate::sdostream_impl::SDOstream;
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -88,45 +16,60 @@ pub struct SDOstreamclust {
 }
 
 #[pymethods]
+#[allow(clippy::too_many_arguments)]
 impl SDOstreamclust {
     #[new]
-    pub fn new() -> Self {
-        Self {
-            sdostream: SDOstream::new(),
-            chi: 4,
-            zeta: 0.5,
-            min_cluster_size: 2,
-        }
-    }
-
-    /// Initialisiert das Modell mit Parametern
-    #[pyo3(signature = (params, dimension = None, *, data = None, time = None))]
-    pub fn initialize(
-        &mut self,
-        params: &SDOstreamclustParams,
+    #[pyo3(signature = (k, x, t_fading, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None, use_brute_force = false))]
+    pub fn new(
+        k: usize,
+        x: usize,
+        t_fading: f64,
+        chi: usize,
+        zeta: f64,
+        min_cluster_size: usize,
+        distance: String,
+        minkowski_p: Option<f64>,
+        rho: f64,
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<()> {
-        // Setze Clustering-spezifische Parameter
-        self.chi = params.chi;
-        self.zeta = params.zeta;
-        self.min_cluster_size = params.min_cluster_size;
+        use_brute_force: bool,
+    ) -> PyResult<Self> {
+        // Check if initialization is needed before moving values
+        let needs_init = data.is_some() || dimension.is_some() || time.is_some();
 
-        // Setze last_cluster_time basierend auf Initialisierung (vor dem move)
-        if let Some(time_array) = &time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() == 1 {
-                self.sdostream.get_sdo_mut().observers.last_cluster_time = time_slice[[0]];
+        let mut instance = Self {
+            sdostream: SDOstream::new(
+                k,
+                x,
+                t_fading,
+                distance,
+                minkowski_p,
+                rho,
+                dimension.clone(),
+                data.clone(),
+                time.clone(),
+                use_brute_force,
+            )?,
+            chi,
+            zeta,
+            min_cluster_size,
+        };
+
+        // Initialisiere mit Parametern (wenn Daten/Dimension/Zeit angegeben)
+        if needs_init {
+            // Setze last_cluster_time basierend auf Initialisierung
+            if let Some(time_array) = &time {
+                let time_slice = time_array.as_array();
+                if time_slice.len() == 1 {
+                    instance.sdostream.get_sdo_mut().observers.last_cluster_time = time_slice[[0]];
+                }
             }
+
+            instance.sdostream.initialize(dimension, data, time)?;
         }
 
-        // Initialisiere SDOstream mit Parametern (delegiert an SDOstream.initialize)
-        let stream_params = params.to_sdostream_params();
-        self.sdostream
-            .initialize(&stream_params, dimension, data, time)?;
-
-        Ok(())
+        Ok(instance)
     }
 
     /// Verarbeitet einen einzelnen Datenpunkt aus dem Stream (Algorithmus 3.2)
@@ -208,20 +151,15 @@ impl SDOstreamclust {
             .observers
             .search_k_nearest_indices(&point_vec, x, true);
 
-        // Summiere Lω Vektoren der x-nächsten Observer
-        let mut label_scores: HashMap<i32, f64> = HashMap::new();
+        // Berechne normalisierte Cluster-Scores der x-nächsten Observer
+        let label_scores = self
+            .sdostream
+            .get_sdo()
+            .observers
+            .get_normalized_cluster_scores(&nearest_indices);
 
-        for &obs_idx in &nearest_indices {
-            if let Some(observer) = self.sdostream.get_sdo().observers.get(obs_idx) {
-                let l_omega = &observer.cluster_observations;
-                for (label_idx, &value) in l_omega.iter().enumerate() {
-                    let label = label_idx as i32;
-                    *label_scores.entry(label).or_insert(0.0) += value;
-                }
-            }
-        }
-
-        // Finde Label mit maximalem Score: argmax_c Σ_ω l_ω^c
+        // Finde Label mit maximalem Score: argmax_c (Σ_ω l̂_ω^c)
+        // wobei l̂_ω normalisiert ist
         let predicted_label = label_scores
             .iter()
             .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
@@ -236,10 +174,30 @@ impl SDOstreamclust {
     pub fn x(&self) -> usize {
         self.sdostream.x()
     }
+
+    /// Berechnet den Outlier-Score für einen Datenpunkt (delegiert an SDOstream)
+    pub fn predict_outlier_score(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
+        self.sdostream.predict(point)
+    }
 }
 
 impl Default for SDOstreamclust {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            10,
+            5,
+            100.0,
+            4,
+            0.5,
+            2,
+            "euclidean".to_string(),
+            None,
+            0.1,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap()
     }
 }

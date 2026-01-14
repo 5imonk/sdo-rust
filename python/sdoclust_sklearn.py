@@ -8,7 +8,7 @@ integriert werden kann.
 """
 
 import numpy as np
-from sdo import SDOclust, SDOclustParams
+from sdo import SDOclust
 
 
 class SDOclustClusterer:
@@ -127,8 +127,7 @@ class SDOclustClusterer:
         """
         X = self._validate_input(X, fit=True)
         
-        self.sdoclust_ = SDOclust()
-        params = SDOclustParams(
+        self.sdoclust_ = SDOclust(
             k=self.k,
             x=self.x,
             rho=self.rho,
@@ -136,7 +135,6 @@ class SDOclustClusterer:
             zeta=self.zeta,
             min_cluster_size=self.min_cluster_size,
         )
-        self.sdoclust_.initialize(params)
         self.sdoclust_.learn(X)
         
         # Berechne Labels für Trainingsdaten

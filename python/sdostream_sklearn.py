@@ -8,7 +8,7 @@ Machine Learning Pipelines integriert werden kann.
 """
 
 import numpy as np
-from sdo import SDOstream, SDOstreamParams
+from sdo import SDOstream
 
 
 class SDOstreamOutlierDetector:
@@ -31,9 +31,7 @@ class SDOstreamOutlierDetector:
         T-Parameter für fading: f = exp(-T_fading^-1). Größere Werte bedeuten
         langsamere Anpassung an neue Daten.
     
-    t_sampling : float, default=10.0
-        T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen).
-        Größere Werte bedeuten selteneres Ersetzen von Observern.
+
     
     distance : str, default="euclidean"
         Distanzmetrik: "euclidean", "manhattan", "chebyshev", "minkowski"
@@ -58,7 +56,7 @@ class SDOstreamOutlierDetector:
     >>> import numpy as np
     >>> 
     >>> # Erstelle Detector
-    >>> detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
+    >>> detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0)
     >>> 
     >>> # Initialisiere mit Daten (optional)
     >>> X_init = np.array([[1, 2], [2, 3], [10, 11]], dtype=np.float64)
@@ -75,7 +73,6 @@ class SDOstreamOutlierDetector:
         k=10,
         x=5,
         t_fading=10.0,
-        t_sampling=10.0,
         distance="euclidean",
         minkowski_p=None,
         tree_type="vptree",
@@ -91,8 +88,7 @@ class SDOstreamOutlierDetector:
             Anzahl der nächsten Nachbarn für Observations.
         t_fading : float, default=10.0
             T-Parameter für fading: f = exp(-T_fading^-1).
-        t_sampling : float, default=10.0
-            T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen).
+            Die Sampling-Rate wird automatisch als t_fading/k berechnet.
         distance : str, default="euclidean"
             Distanzmetrik.
         minkowski_p : float, optional
@@ -103,7 +99,6 @@ class SDOstreamOutlierDetector:
         self.k = k
         self.x = x
         self.t_fading = t_fading
-        self.t_sampling = t_sampling
         self.distance = distance
         self.minkowski_p = minkowski_p
         self.tree_type = tree_type
@@ -128,17 +123,17 @@ class SDOstreamOutlierDetector:
         """
         X = self._validate_input(X, fit=True)
         
-        self.sdostream_ = SDOstream()
-        params = SDOstreamParams(
+        self.sdostream_ = SDOstream(
             k=self.k,
             x=self.x,
             t_fading=self.t_fading,
-            t_sampling=self.t_sampling,
             distance=self.distance,
             minkowski_p=self.minkowski_p,
-            tree_type=self.tree_type,
+            rho=0.1,  # Default rho
+            dimension=None,
+            data=X,
+            time=None,
         )
-        self.sdostream_.initialize(params, data=X)
         
         return self
     
@@ -309,7 +304,7 @@ class SDOstreamOutlierDetector:
         """String-Repräsentation des Objekts."""
         return (
             f"SDOstreamOutlierDetector(k={self.k}, x={self.x}, t_fading={self.t_fading:.2f}, "
-            f"t_sampling={self.t_sampling:.2f}, distance={self.distance})"
+            f"distance={self.distance})"
         )
 
 
@@ -320,7 +315,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     # Erstelle Detector
-    detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
+    detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0)
     print(f"\nDetector: {detector}")
     
     # Initialisiere mit Daten
