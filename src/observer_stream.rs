@@ -105,6 +105,7 @@ impl ObserverSet {
                     age: new_age,
                     index: observer_arc.index,
                     label: observer_arc.label,
+                    cluster_observations: observer_arc.cluster_observations.clone(),
                 })
             }
         };

@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Scikit-learn-ähnliche API für SDOstream (Sparse Data Observers Streaming)
+Scikit-learn-ähnliche API für SDOstreamclust (Sparse Data Observers Streaming Clustering)
 
-Diese Klasse bietet eine kompatible API zu scikit-learn's Outlier Detection
-Algorithmen für Streaming-Daten, sodass SDOstream einfach in bestehende
+Diese Klasse bietet eine kompatible API zu scikit-learn's Clustering
+Algorithmen für Streaming-Daten, sodass SDOstreamclust einfach in bestehende
 Machine Learning Pipelines integriert werden kann.
 """
 
 import numpy as np
-from sdo import SDOstream, SDOstreamParams
+from sdo import SDOstreamclust, SDOstreamclustParams
 
 
-class SDOstreamOutlierDetector:
+class SDOstreamclustClusterer:
     """
-    Sparse Data Observers Streaming (SDOstream) Outlier Detection mit scikit-learn-ähnlicher API.
+    Sparse Data Observers Streaming Clustering (SDOstreamclust) mit scikit-learn-ähnlicher API.
     
     Diese Klasse implementiert eine kompatible Schnittstelle zu scikit-learn's
-    Outlier Detection Algorithmen für Streaming-Daten, sodass SDOstream einfach
+    Clustering Algorithmen für Streaming-Daten, sodass SDOstreamclust einfach
     in bestehende Pipelines integriert werden kann.
     
     Parameters
@@ -25,7 +25,7 @@ class SDOstreamOutlierDetector:
         Anzahl der Observer (Modellgröße). Muss fest sein für Streaming.
     
     x : int, default=5
-        Anzahl der nächsten Nachbarn für Observations.
+        Anzahl der nächsten Nachbarn für Observations und Predictions.
     
     t_fading : float, default=10.0
         T-Parameter für fading: f = exp(-T_fading^-1). Größere Werte bedeuten
@@ -35,39 +35,46 @@ class SDOstreamOutlierDetector:
         T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen).
         Größere Werte bedeuten selteneres Ersetzen von Observern.
     
+    chi : int, default=4
+        Anzahl der nächsten Observer für lokale Cutoff-Thresholds (χ).
+    
+    zeta : float, default=0.5
+        Mixing-Parameter für globale/lokale Thresholds (0.0-1.0).
+        Höhere Werte betonen lokale Thresholds mehr.
+    
+    min_cluster_size : int, default=2
+        Minimale Clustergröße (e). Cluster mit weniger Observer werden entfernt.
+    
     distance : str, default="euclidean"
         Distanzmetrik: "euclidean", "manhattan", "chebyshev", "minkowski"
     
     minkowski_p : float, optional
         p-Parameter für Minkowski-Distanz (nur wenn distance="minkowski")
     
-    tree_type : str, default="vptree"
-        Baum-Typ: "vptree" (default) oder "kdtree"
-    
     Attributes
     ----------
-    sdostream_ : SDOstream
-        Das interne SDOstream-Modell.
+    sdostreamclust_ : SDOstreamclust
+        Das interne SDOstreamclust-Modell.
     
     n_features_in_ : int
         Anzahl der Features (Dimensionen) im Trainingsdatensatz.
     
     Examples
     --------
-    >>> from sdostream_sklearn import SDOstreamOutlierDetector
+    >>> from sdostreamclust_sklearn import SDOstreamclustClusterer
     >>> import numpy as np
     >>> 
-    >>> # Erstelle Detector
-    >>> detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
+    >>> # Erstelle Clusterer
+    >>> clusterer = SDOstreamclustClusterer(k=10, x=5, t_fading=10.0, t_sampling=10.0)
     >>> 
     >>> # Initialisiere mit Daten (optional)
     >>> X_init = np.array([[1, 2], [2, 3], [10, 11]], dtype=np.float64)
-    >>> detector.fit(X_init)
+    >>> clusterer.fit(X_init)
     >>> 
     >>> # Streaming: Verarbeite einzelne Punkte
     >>> for point in new_streaming_data:
-    >>>     score = detector.predict(point.reshape(1, -1))
-    >>>     detector.partial_fit(point.reshape(1, -1))
+    >>>     label = clusterer.predict(point.reshape(1, -1))
+    >>>     clusterer.partial_fit(point.reshape(1, -1))
     """
     
     def __init__(
@@ -76,12 +83,14 @@ class SDOstreamOutlierDetector:
         x=5,
         t_fading=10.0,
         t_sampling=10.0,
+        chi=4,
+        zeta=0.5,
+        min_cluster_size=2,
         distance="euclidean",
         minkowski_p=None,
-        tree_type="vptree",
     ):
         """
-        Initialisiere den SDOstream Outlier Detector.
+        Initialisiere den SDOstreamclust Clusterer.
         
         Parameters
         ----------
@@ -93,26 +102,32 @@ class SDOstreamOutlierDetector:
             T-Parameter für fading: f = exp(-T_fading^-1).
         t_sampling : float, default=10.0
             T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen).
+        chi : int, default=4
+            Anzahl der nächsten Observer für lokale Thresholds.
+        zeta : float, default=0.5
+            Mixing-Parameter für globale/lokale Thresholds.
+        min_cluster_size : int, default=2
+            Minimale Clustergröße.
         distance : str, default="euclidean"
             Distanzmetrik.
         minkowski_p : float, optional
             p-Parameter für Minkowski-Distanz.
-        tree_type : str, default="vptree"
-            Baum-Typ.
         """
         self.k = k
         self.x = x
         self.t_fading = t_fading
         self.t_sampling = t_sampling
+        self.chi = chi
+        self.zeta = zeta
+        self.min_cluster_size = min_cluster_size
         self.distance = distance
         self.minkowski_p = minkowski_p
-        self.tree_type = tree_type
-        self.sdostream_ = None
+        self.sdostreamclust_ = None
         self.n_features_in_ = None
     
     def fit(self, X, y=None):
         """
-        Initialisiere das SDOstream-Modell mit Daten.
+        Initialisiere das SDOstreamclust-Modell mit Daten.
         
         Parameters
         ----------
@@ -128,17 +143,19 @@ class SDOstreamOutlierDetector:
         """
         X = self._validate_input(X, fit=True)
         
-        self.sdostream_ = SDOstream()
-        params = SDOstreamParams(
+        self.sdostreamclust_ = SDOstreamclust()
+        params = SDOstreamclustParams(
             k=self.k,
             x=self.x,
             t_fading=self.t_fading,
             t_sampling=self.t_sampling,
+            chi=self.chi,
+            zeta=self.zeta,
+            min_cluster_size=self.min_cluster_size,
             distance=self.distance,
             minkowski_p=self.minkowski_p,
-            tree_type=self.tree_type,
         )
-        self.sdostream_.initialize(params, data=X)
+        self.sdostreamclust_.initialize(params, data=X)
         
         return self
     
@@ -158,7 +175,7 @@ class SDOstreamOutlierDetector:
         self : object
             Gibt self zurück.
         """
-        if self.sdostream_ is None:
+        if self.sdostreamclust_ is None:
             # Wenn noch nicht initialisiert, verwende fit()
             return self.fit(X, y)
         
@@ -167,41 +184,40 @@ class SDOstreamOutlierDetector:
         # Verarbeite jeden Punkt einzeln (Streaming)
         for point in X:
             point_2d = point.reshape(1, -1)
-            self.sdostream_.learn(point_2d)
+            self.sdostreamclust_.learn(point_2d)
         
         return self
     
     def predict(self, X):
         """
-        Berechne Outlier-Scores für die gegebenen Datenpunkte.
+        Berechne Cluster-Labels für die gegebenen Datenpunkte.
         
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Datenpunkte, für die Outlier-Scores berechnet werden sollen.
+            Datenpunkte, für die Cluster-Labels berechnet werden sollen.
         
         Returns
         -------
-        scores : ndarray of shape (n_samples,)
-            Outlier-Scores für jeden Datenpunkt. Höhere Werte bedeuten
-            höhere Wahrscheinlichkeit, dass der Punkt ein Outlier ist.
+        labels : ndarray of shape (n_samples,)
+            Cluster-Labels für jeden Datenpunkt. -1 bedeutet Outlier/kein Cluster.
         """
-        if self.sdostream_ is None:
+        if self.sdostreamclust_ is None:
             raise ValueError("Modell muss zuerst mit fit() initialisiert werden.")
         
         X = self._validate_input(X, fit=False)
         
-        scores = []
+        labels = []
         for point in X:
             point_2d = point.reshape(1, -1)
-            score = self.sdostream_.predict(point_2d)
-            scores.append(score)
+            label = self.sdostreamclust_.predict(point_2d)
+            labels.append(label)
         
-        return np.array(scores)
+        return np.array(labels)
     
     def fit_predict(self, X, y=None):
         """
-        Initialisiere das Modell und berechne Outlier-Scores für die Initialisierungsdaten.
+        Initialisiere das Modell und berechne Cluster-Labels für die Initialisierungsdaten.
         
         Parameters
         ----------
@@ -212,47 +228,10 @@ class SDOstreamOutlierDetector:
         
         Returns
         -------
-        scores : ndarray of shape (n_samples,)
-            Outlier-Scores für jeden Datenpunkt.
+        labels : ndarray of shape (n_samples,)
+            Cluster-Labels für jeden Datenpunkt.
         """
-        return self.fit(X, y).predict(X)
-    
-    def score_samples(self, X):
-        """
-        Berechne Outlier-Scores (Alias für predict).
-        
-        Diese Methode ist kompatibel mit scikit-learn's Outlier Detection API.
-        
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Datenpunkte.
-        
-        Returns
-        -------
-        scores : ndarray of shape (n_samples,)
-            Outlier-Scores für jeden Datenpunkt.
-        """
-        return self.predict(X)
-    
-    def decision_function(self, X):
-        """
-        Berechne Decision Function Werte (Alias für predict).
-        
-        Diese Methode ist kompatibel mit scikit-learn's Outlier Detection API.
-        Negative Werte bedeuten Outlier, positive Werte normale Punkte.
-        Hier geben wir einfach die Scores zurück (höhere = mehr Outlier).
-        
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Datenpunkte.
-        
-        Returns
-        -------
-        scores : ndarray of shape (n_samples,)
-            Decision Function Werte.
-        """
+        self.fit(X, y)
         return self.predict(X)
     
     def n_observers(self):
@@ -264,9 +243,9 @@ class SDOstreamOutlierDetector:
         n_observers : int
             Anzahl der Observer im Modell.
         """
-        if self.sdostream_ is None:
+        if self.sdostreamclust_ is None:
             raise ValueError("Modell muss zuerst mit fit() initialisiert werden.")
-        return self.sdostream_.sdo.x
+        return self.sdostreamclust_.x()
     
     def _validate_input(self, X, fit=False):
         """
@@ -308,54 +287,61 @@ class SDOstreamOutlierDetector:
     def __repr__(self):
         """String-Repräsentation des Objekts."""
         return (
-            f"SDOstreamOutlierDetector(k={self.k}, x={self.x}, t_fading={self.t_fading:.2f}, "
-            f"t_sampling={self.t_sampling:.2f}, distance={self.distance})"
+            f"SDOstreamclustClusterer(k={self.k}, x={self.x}, t_fading={self.t_fading:.2f}, "
+            f"t_sampling={self.t_sampling:.2f}, chi={self.chi}, zeta={self.zeta:.2f}, "
+            f"min_cluster_size={self.min_cluster_size})"
         )
 
 
 # Beispiel-Verwendung
 if __name__ == "__main__":
     print("=" * 60)
-    print("SDOstream Scikit-learn-ähnliche API - Beispiel")
+    print("SDOstreamclust Scikit-learn-ähnliche API - Beispiel")
     print("=" * 60)
     
-    # Erstelle Detector
-    detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
-    print(f"\nDetector: {detector}")
+    # Erstelle Clusterer
+    clusterer = SDOstreamclustClusterer(
+        k=10, x=5, t_fading=10.0, t_sampling=10.0,
+        chi=4, zeta=0.5, min_cluster_size=2
+    )
+    print(f"\nClusterer: {clusterer}")
     
     # Initialisiere mit Daten
     np.random.seed(42)
-    init_data = np.random.randn(20, 2) * 1.5 + np.array([3.0, 3.0])
+    cluster1 = np.random.randn(10, 2) * 0.5 + np.array([2.0, 2.0])
+    cluster2 = np.random.randn(10, 2) * 0.5 + np.array([8.0, 8.0])
+    init_data = np.vstack([cluster1, cluster2])
     
     print(f"\nInitialisiere mit {len(init_data)} Datenpunkten...")
-    detector.fit(init_data)
-    print(f"✓ Modell initialisiert mit {detector.n_observers()} Observern")
+    clusterer.fit(init_data)
+    print(f"✓ Modell initialisiert mit {clusterer.n_observers()} Observern")
     
     # Streaming: Verarbeite neue Punkte
     print("\nStreaming-Verarbeitung:")
     streaming_points = [
-        np.array([3.0, 3.0], dtype=np.float64),    # Normal
-        np.array([15.0, 15.0], dtype=np.float64), # Outlier
-        np.array([3.5, 3.5], dtype=np.float64),   # Normal
-        np.array([20.0, 20.0], dtype=np.float64), # Outlier
+        np.array([2.0, 2.0], dtype=np.float64),    # Cluster 1
+        np.array([8.0, 8.0], dtype=np.float64),    # Cluster 2
+        np.array([2.5, 2.5], dtype=np.float64),    # Cluster 1
+        np.array([15.0, 15.0], dtype=np.float64),  # Outlier/Neuer Cluster
     ]
     
     for i, point in enumerate(streaming_points, 1):
         point_2d = point.reshape(1, -1)
         
-        # Vorher: Score berechnen
-        score_before = detector.predict(point_2d)[0]
+        # Vorher: Label berechnen
+        label_before = clusterer.predict(point_2d)[0]
         
         # Punkt verarbeiten (Modell aktualisiert sich)
-        detector.partial_fit(point_2d)
+        clusterer.partial_fit(point_2d)
         
-        # Nachher: Score berechnen
-        score_after = detector.predict(point_2d)[0]
+        # Nachher: Label berechnen
+        label_after = clusterer.predict(point_2d)[0]
         
+        label_str_before = f"Cluster {label_before}" if label_before >= 0 else "Outlier"
+        label_str_after = f"Cluster {label_after}" if label_after >= 0 else "Outlier"
         print(f"  Punkt {i}: [{point[0]:5.1f}, {point[1]:5.1f}] "
-              f"→ Score vorher: {score_before:.4f}, "
-              f"nachher: {score_after:.4f}")
+              f"→ Label vorher: {label_str_before}, "
+              f"nachher: {label_str_after}")
     
-    print(f"\nFinale Anzahl Observer: {detector.n_observers()}")
+    print(f"\nFinale Anzahl Observer: {clusterer.n_observers()}")
     print("\n✓ Beispiel erfolgreich abgeschlossen!")
-

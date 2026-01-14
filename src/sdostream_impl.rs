@@ -15,7 +15,9 @@ pub struct SDOstreamParams {
     #[pyo3(get, set)]
     pub x: usize, // Anzahl der nächsten Observer für Prediction
     #[pyo3(get, set)]
-    pub t: f64, // T-Parameter für fading: f = exp(-T^-1)
+    pub t_fading: f64, // T-Parameter für fading: f = exp(-T_fading^-1)
+    #[pyo3(get, set)]
+    pub t_sampling: f64, // T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen)
     #[pyo3(get, set)]
     pub distance: String, // "euclidean", "manhattan", "chebyshev", "minkowski"
     #[pyo3(get, set)]
@@ -27,11 +29,12 @@ pub struct SDOstreamParams {
 #[pymethods]
 impl SDOstreamParams {
     #[new]
-    #[pyo3(signature = (k, x, t, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1))]
+    #[pyo3(signature = (k, x, t_fading, t_sampling, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1))]
     pub fn new(
         k: usize,
         x: usize,
-        t: f64,
+        t_fading: f64,
+        t_sampling: f64,
         distance: String,
         minkowski_p: Option<f64>,
         rho: f64,
@@ -39,7 +42,8 @@ impl SDOstreamParams {
         Self {
             k,
             x,
-            t,
+            t_fading,
+            t_sampling,
             distance,
             minkowski_p,
             rho,
@@ -48,12 +52,12 @@ impl SDOstreamParams {
 }
 
 impl SDOstreamParams {
-    /// Berechnet den Fading-Parameter f = exp(-T^-1)
+    /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
     fn get_fading(&self) -> f64 {
-        (-1.0 / self.t).exp()
+        (-1.0 / self.t_fading).exp()
     }
 
-    /// Berechnet die Sampling-Rate T_k = -k · ln(f)
+    /// Berechnet die Sampling-Rate T_k = -k · ln(f) (für Kompatibilität, nicht mehr verwendet)
     fn get_sampling_rate(&self) -> f64 {
         let f = self.get_fading();
         -(self.k as f64) * f.ln()
@@ -78,12 +82,15 @@ impl SDOstreamParams {
 pub struct SDOstream {
     sdo: SDO,                     // Basis SDO-Implementierung
     fading: f64,                  // f = exp(-T^-1)
-    sampling_rate: f64,           // T_k = -k · ln(f)
+    sampling_rate: f64,           // T_k = -k · ln(f) (für Kompatibilität, nicht mehr verwendet)
     data_points_processed: usize, // Zähler für Sampling
     k: usize,                     // Anzahl der Observer (Modellgröße)
-    t: f64,                       // T-Parameter für fading
-    rho: f64,                     // Rho-Parameter (für num_active Berechnung)
+    t_fading: f64,                // T-Parameter für fading: f = exp(-T_fading^-1)
+    t_sampling: f64, // T-Parameter für Sampling-Rate (durchschnittliche Zeit zwischen Ersetzungen)
+    rho: f64,        // Rho-Parameter (für num_active Berechnung)
     use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
+    last_replacement_time: f64, // Zeit der letzten Prüfung/Ersetzung (für Lazy Replacement)
+    pending_replacements: usize, // Anzahl der ausstehenden Ersetzungen (wenn num_replacements > 1)
 }
 
 #[pymethods]
@@ -96,9 +103,12 @@ impl SDOstream {
             sampling_rate: 0.01,
             data_points_processed: 0,
             k: 100,
-            t: 100.0,
+            t_fading: 100.0,
+            t_sampling: 100.0,
             rho: 0.1,
-            use_explicit_time: false, // Default: auto-increment
+            use_explicit_time: false,   // Default: auto-increment
+            last_replacement_time: 0.0, // Startzeit für Lazy Replacement
+            pending_replacements: 0,    // Keine ausstehenden Ersetzungen
         }
     }
 
@@ -122,20 +132,38 @@ impl SDOstream {
     ) -> PyResult<()> {
         // Setze Parameter
         self.k = params.k;
-        self.t = params.t;
+        self.t_fading = params.t_fading;
+        self.t_sampling = params.t_sampling;
         self.rho = params.rho;
 
         // Initialisiere Streaming-spezifische Parameter
         self.fading = params.get_fading();
         self.sampling_rate = params.get_sampling_rate();
 
-        // Initialisiere SDO mit Parametern
-        let sdo_params = params.to_sdo_params();
-        self.sdo.initialize(&sdo_params)?;
-
         // Entscheide Zeit-Strategie: Wenn time bei Initialisierung angegeben, erwarte time bei learn()
         // Sonst verwende auto-increment basierend auf data_points_processed
         self.use_explicit_time = time.is_some();
+
+        // Bestimme Startzeit für exponentielles Sampling
+        let start_time = if let Some(time_array) = &time {
+            let time_slice = time_array.as_array();
+            if time_slice.len() != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Zeit muss ein 1D-Array mit einem Wert sein",
+                ));
+            }
+            time_slice[[0]]
+        } else {
+            0.0
+        };
+
+        // Initialisiere Lazy Replacement: Startzeit setzen
+        self.last_replacement_time = start_time;
+        self.pending_replacements = 0; // Keine ausstehenden Ersetzungen bei Initialisierung
+
+        // Initialisiere SDO mit Parametern
+        let sdo_params = params.to_sdo_params();
+        self.sdo.initialize(&sdo_params)?;
 
         // Prüfe, ob sowohl data als auch dimension gegeben sind (Fehler)
         if data.is_some() && dimension.is_some() {
@@ -214,6 +242,7 @@ impl SDOstream {
                     age: 1.0,
                     index: idx,
                     label: None,
+                    cluster_observations: Vec::new(),
                 };
                 self.sdo.observers.insert(observer);
             }
@@ -286,10 +315,8 @@ impl SDOstream {
         // Increment data_points_processed für auto-increment Modus
         self.data_points_processed += 1;
 
-        // Schritt 3: Sampling - ersetze Observer basierend auf normalisierter Qualität
-        if self.should_sample() {
-            self.replace_observer(&point_vec, current_time)?;
-        }
+        // Schritt 3: Sampling - Lazy Replacement basierend auf verstrichener Zeit (Poisson-basiert)
+        self.check_and_replace(current_time, &point_vec)?;
 
         Ok(())
     }
@@ -309,13 +336,100 @@ impl SDOstream {
 }
 
 impl SDOstream {
-    /// Prüft, ob ein Observer ersetzt werden sollte basierend auf Sampling-Rate
-    fn should_sample(&self) -> bool {
-        if self.sampling_rate <= 0.0 {
-            return false;
+    /// Gibt fading zurück (für interne Verwendung)
+    pub(crate) fn get_fading(&self) -> f64 {
+        self.fading
+    }
+
+    /// Gibt use_explicit_time zurück (für interne Verwendung)
+    pub(crate) fn get_use_explicit_time(&self) -> bool {
+        self.use_explicit_time
+    }
+
+    /// Gibt data_points_processed zurück (für interne Verwendung)
+    pub(crate) fn get_data_points_processed(&self) -> usize {
+        self.data_points_processed
+    }
+
+    /// Gibt sdo zurück (für interne Verwendung)
+    pub(crate) fn get_sdo(&self) -> &SDO {
+        &self.sdo
+    }
+
+    /// Gibt sdo mut zurück (für interne Verwendung)
+    pub(crate) fn get_sdo_mut(&mut self) -> &mut SDO {
+        &mut self.sdo
+    }
+}
+
+impl SDOstream {
+    /// Prüft und führt Ersetzungen basierend auf verstrichener Zeit durch (Lazy Replacement)
+    /// Verwendet Poisson-Verteilung für die Anzahl der Ersetzungen
+    /// Funktioniert sowohl für einzelne Punkte als auch für Batches
+    fn check_and_replace(&mut self, current_time: f64, new_point: &[f64]) -> PyResult<()> {
+        let elapsed = current_time - self.last_replacement_time;
+
+        if elapsed <= 0.0 {
+            return Ok(()); // Keine Zeit vergangen oder Zeit geht zurück
         }
-        let probability = 1.0 / self.sampling_rate;
-        thread_rng().gen::<f64>() < probability
+
+        // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / T_sampling
+        let lambda_events = elapsed / self.t_sampling;
+
+        // Simuliere Poisson-Anzahl von Ersetzungen
+        let num_replacements = self.sample_poisson(lambda_events);
+
+        // Berücksichtige ausstehende Ersetzungen von vorherigen Aufrufen
+        let total_replacements = num_replacements + self.pending_replacements;
+
+        // Führe nur eine Ersetzung durch (auch wenn total_replacements > 1)
+        if total_replacements > 0 {
+            self.replace_observer(new_point, current_time)?;
+            self.last_replacement_time = current_time;
+
+            // Speichere verbleibende Ersetzungen für nächste Aufrufe
+            self.pending_replacements = total_replacements - 1;
+        }
+        // Wenn total_replacements == 0: last_replacement_time bleibt unverändert
+        // (Zeit wird beim nächsten Aufruf akkumuliert)
+
+        Ok(())
+    }
+
+    /// Generiert eine Poisson-verteilte Zufallszahl
+    /// Verwendet Knuth's Algorithm für kleine λ, sonst Normal-Approximation
+    fn sample_poisson(&self, lambda: f64) -> usize {
+        if lambda <= 0.0 {
+            return 0;
+        }
+
+        let mut rng = thread_rng();
+
+        if lambda < 30.0 {
+            // Knuth's Algorithm für kleine λ
+            let l = (-lambda).exp();
+            let mut k = 0;
+            let mut p = 1.0;
+
+            loop {
+                k += 1;
+                p *= rng.gen::<f64>();
+                if p <= l {
+                    break;
+                }
+            }
+            k - 1
+        } else {
+            // Normal-Approximation für große λ (Box-Muller Transformation)
+            let mean = lambda;
+            let std_dev = lambda.sqrt();
+            // Generiere zwei normalverteilte Werte
+            let u1: f64 = rng.gen();
+            let u2: f64 = rng.gen();
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            let sample = mean + std_dev * z;
+            sample.max(0.0) as usize
+        }
     }
 
     /// Ersetzt einen Observer basierend auf normalisierter Qualitätsmetrik P̃ω = Pω / Hω
@@ -337,6 +451,7 @@ impl SDOstream {
             age: 1.0,           // Neuer Observer startet mit Hω = 1
             index: self.data_points_processed,
             label: None,
+            cluster_observations: Vec::new(),
         };
 
         // Verwende SDO's replace_observer Methode - O(log n)

@@ -156,11 +156,11 @@ def example_sdostream():
     
     print(f"\nInitialisierungsdaten: {init_data.shape[0]} Punkte")
     
-    params = SDOstreamParams(k=10, x=5, t=10.0)
+    params = SDOstreamParams(k=10, x=5, t_fading=10.0, t_sampling=10.0)
     sdostream.initialize(params, data=init_data)
     print(f"✓ Modell initialisiert mit {sdostream.sdo.x} Observern")
-    print(f"  Fading-Parameter f = exp(-1/T) = {np.exp(-1.0/params.t):.4f}")
-    print(f"  Sampling-Rate T_k = -k * ln(f) = {-params.k * np.log(np.exp(-1.0/params.t)):.2f}")
+    print(f"  Fading-Parameter f = exp(-1/T_fading) = {np.exp(-1.0/params.t_fading):.4f}")
+    print(f"  Sampling-Rate T_sampling = {params.t_sampling:.2f}")
     
     # Streaming: Verarbeite einzelne Punkte
     print("\nStreaming-Verarbeitung (ein Punkt nach dem anderen):")
@@ -243,7 +243,7 @@ def example_comparison():
     # SDOstream
     print("\n3. SDOstream (Streaming Outlier Detection):")
     sdostream = SDOstream()
-    sdostream_params = SDOstreamParams(k=15, x=5, t=10.0)
+    sdostream_params = SDOstreamParams(k=15, x=5, t_fading=10.0, t_sampling=10.0)
     sdostream.initialize(sdostream_params, data=data)
     
     # Simuliere Streaming: Verarbeite einige Punkte
@@ -284,7 +284,7 @@ def example_sklearn_integration():
         
         # SDOstream mit sklearn-API
         print("\n2. SDOstream mit sklearn-API:")
-        stream_detector = SDOstreamOutlierDetector(k=10, x=5, t=10.0)
+        stream_detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0, t_sampling=10.0)
         stream_detector.fit(X[:20])  # Initialisiere mit ersten 20 Punkten
         
         # Streaming

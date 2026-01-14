@@ -7,6 +7,46 @@ use std::sync::Arc;
 
 use crate::utils::{compute_distance, DistanceMetric};
 
+/// Geordnete Distanzliste für einen Observer
+/// Speichert Distanzen zu anderen Observern als (index, distance) Paare, sortiert nach distance
+#[derive(Clone, Debug)]
+pub(crate) struct OrderedDistanceList {
+    /// Liste von (target_index, distance) Paaren, sortiert nach distance (aufsteigend)
+    pub(crate) distances: Vec<(usize, f64)>,
+}
+
+impl OrderedDistanceList {
+    /// Erstellt eine neue leere Distanzliste
+    pub(crate) fn new() -> Self {
+        Self {
+            distances: Vec::new(),
+        }
+    }
+
+    /// Fügt eine Distanz hinzu und behält die Sortierung bei
+    /// O(n) - könnte mit Binary Search optimiert werden, aber für kleine n ist linear besser
+    fn insert(&mut self, target_index: usize, distance: f64) {
+        // Entferne alte Einträge für diesen target_index
+        self.distances.retain(|(idx, _)| *idx != target_index);
+
+        // Füge neuen Eintrag hinzu und sortiere
+        self.distances.push((target_index, distance));
+        self.distances
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    }
+
+    /// Entfernt einen Eintrag für den gegebenen target_index
+    fn remove(&mut self, target_index: usize) {
+        self.distances.retain(|(idx, _)| *idx != target_index);
+    }
+
+    /// Gibt alle Distanzen zurück (nur für Debugging)
+    #[allow(dead_code)]
+    fn get_all_distances(&self) -> &[(usize, f64)] {
+        &self.distances
+    }
+}
+
 /// Observer-Struktur mit Daten, Beobachtungen und Index
 #[derive(Clone, Debug)]
 pub struct Observer {
@@ -17,6 +57,8 @@ pub struct Observer {
     pub age: f64,
     pub index: usize,
     pub label: Option<i32>,
+    /// Cluster observations Lω ∈ R^|C| - historische Cluster-Zugehörigkeiten
+    pub cluster_observations: Vec<f64>,
 }
 
 // Helper struct for comparing floats in collections
@@ -149,6 +191,18 @@ pub struct ObserverSet {
 
     // Number of active observers
     num_active: usize,
+
+    // Cached index of the last active observer (lowest observations score among active observers)
+    // None if num_active == 0 or there are fewer than num_active observers
+    last_active_observer: Option<usize>,
+
+    // Geordnete Distanzlisten für jeden Observer (für effiziente lokale Threshold-Berechnung)
+    // Key: observer_index -> OrderedDistanceList
+    // Wird nur aktualisiert wenn clustering aktiv ist (lazy initialization)
+    pub(crate) distance_lists: HashMap<usize, OrderedDistanceList>,
+
+    // Letzte Zeit für Cluster-Beobachtungs-Fading (für SDOstreamclust)
+    pub(crate) last_cluster_time: f64,
 }
 
 impl ObserverSet {
@@ -162,6 +216,9 @@ impl ObserverSet {
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
             num_active: 0,
+            last_active_observer: None,
+            distance_lists: HashMap::new(),
+            last_cluster_time: 0.0,
         }
     }
 
@@ -199,6 +256,136 @@ impl ObserverSet {
         if let Ok(mut tree_opt) = self.spatial_tree_active.try_borrow_mut() {
             *tree_opt = None;
         }
+        // Update last_active_observer cache
+        self.update_last_active_observer();
+    }
+
+    /// Aktualisiert den Cache für last_active_observer
+    /// Sollte aufgerufen werden, wenn sich die Observer-Liste oder num_active ändert
+    fn update_last_active_observer(&mut self) {
+        if self.num_active == 0 {
+            self.last_active_observer = None;
+            return;
+        }
+
+        // Finde den Observer an Position num_active - 1 (0-indexiert)
+        // Das ist der Observer mit dem niedrigsten observations-Score unter den aktiven
+        self.last_active_observer = self
+            .indices_by_obs
+            .iter()
+            .nth(self.num_active - 1)
+            .map(|(_key, &idx)| idx);
+    }
+
+    /// Aktualisiert Distanzlisten, wenn ein neuer Observer eingefügt wird
+    fn update_distance_lists_on_insert(&mut self, new_index: usize, new_data: &[f64]) {
+        // Für jeden existierenden Observer: Berechne Distanz zum neuen Observer und füge sie hinzu
+        for (existing_index, existing_arc) in &self.observers_by_index {
+            if *existing_index != new_index {
+                let existing_data = &existing_arc.data;
+                let distance = compute_distance(
+                    existing_data,
+                    new_data,
+                    self.distance_metric,
+                    self.minkowski_p,
+                );
+
+                // Füge Distanz zur Liste des existierenden Observers hinzu
+                let list = self
+                    .distance_lists
+                    .entry(*existing_index)
+                    .or_insert_with(OrderedDistanceList::new);
+                list.insert(new_index, distance);
+            }
+        }
+
+        // Erstelle neue Distanzliste für den neuen Observer
+        let mut new_list = OrderedDistanceList::new();
+        for (existing_index, existing_arc) in &self.observers_by_index {
+            if *existing_index != new_index {
+                let existing_data = &existing_arc.data;
+                let distance = compute_distance(
+                    new_data,
+                    existing_data,
+                    self.distance_metric,
+                    self.minkowski_p,
+                );
+                new_list.insert(*existing_index, distance);
+            }
+        }
+        self.distance_lists.insert(new_index, new_list);
+    }
+
+    /// Aktualisiert Distanzlisten, wenn ein Observer entfernt wird
+    fn update_distance_lists_on_remove(&mut self, removed_index: usize) {
+        // Entferne die Distanzliste des entfernten Observers
+        self.distance_lists.remove(&removed_index);
+
+        // Entferne Einträge für diesen Observer aus allen anderen Distanzlisten
+        for list in self.distance_lists.values_mut() {
+            list.remove(removed_index);
+        }
+    }
+
+    /// Baut alle Distanzlisten neu auf (für initiale Berechnung oder wenn sich viele Observer geändert haben)
+    pub(crate) fn rebuild_distance_lists(&mut self) {
+        self.distance_lists.clear();
+
+        let indices: Vec<usize> = self.observers_by_index.keys().cloned().collect();
+        let data_map: HashMap<usize, &[f64]> = self
+            .observers_by_index
+            .iter()
+            .map(|(idx, arc)| (*idx, arc.data.as_slice()))
+            .collect();
+
+        for &i in &indices {
+            let mut list = OrderedDistanceList::new();
+            let data_i = data_map[&i];
+
+            for &j in &indices {
+                if i != j {
+                    let data_j = data_map[&j];
+                    let distance =
+                        compute_distance(data_i, data_j, self.distance_metric, self.minkowski_p);
+                    list.insert(j, distance);
+                }
+            }
+            self.distance_lists.insert(i, list);
+        }
+    }
+    /// Prüft, ob ein Observer aktiv ist (gehört zu den Top num_active Observern nach observations)
+    /// Ein Observer ist aktiv, wenn seine observations >= observations des last_active_observer sind
+    /// O(1) - verwendet gecachten last_active_observer
+    pub(crate) fn is_active(&self, index: usize) -> bool {
+        if self.num_active == 0 {
+            return false; // Keine aktiven Observer definiert
+        }
+
+        // Hole den Observer
+        let observer = match self.observers_by_index.get(&index) {
+            Some(arc) => arc.as_ref(),
+            None => return false, // Observer existiert nicht
+        };
+
+        // Verwende gecachten last_active_observer
+        match self.last_active_observer {
+            Some(last_active_idx) => {
+                // Hole den last_active_observer
+                let last_active_arc = match self.observers_by_index.get(&last_active_idx) {
+                    Some(arc) => arc.as_ref(),
+                    None => {
+                        // Cache ist veraltet, alle Observer sind aktiv
+                        return true;
+                    }
+                };
+                // Observer ist aktiv, wenn seine observations >= observations des last_active_observer
+                observer.observations >= last_active_arc.observations
+            }
+            None => {
+                // Wenn es weniger als num_active Observer gibt, sind alle aktiv
+                true
+            }
+        }
     }
 
     /// Insert a new observer - O(log n)
@@ -230,6 +417,12 @@ impl ObserverSet {
         // Incrementally add to kiddo KD-Tree if it exists (nur für euklidische Distanz)
         // Sonst wird der Baum lazy gebaut wenn nötig
         self.insert_into_tree(index, &data);
+
+        // Update last_active_observer cache, da sich die Observer-Liste geändert hat
+        self.update_last_active_observer();
+
+        // Update distance lists für alle Observer
+        self.update_distance_lists_on_insert(index, &data);
     }
 
     /// Get observer by index - O(1)
@@ -281,6 +474,7 @@ impl ObserverSet {
                     age: new_age,
                     index: observer_arc.index,
                     label: observer_arc.label,
+                    cluster_observations: observer_arc.cluster_observations.clone(),
                 })
             }
         };
@@ -305,6 +499,9 @@ impl ObserverSet {
 
         self.indices_by_obs.insert(new_obs_key, index);
         self.indices_by_score.insert(new_score_key, index);
+
+        // Update last_active_observer cache, da sich observations geändert haben
+        self.update_last_active_observer();
 
         true
     }
@@ -373,6 +570,12 @@ impl ObserverSet {
 
         // Remove Observer from Spatial Tree
         self.remove_from_tree(index);
+
+        // Update last_active_observer cache, da sich die Observer-Liste geändert hat
+        self.update_last_active_observer();
+
+        // Update distance lists: Entferne diesen Observer aus allen Distanzlisten
+        self.update_distance_lists_on_remove(index);
 
         // Return owned Observer (dereference Arc)
         Some((*observer_arc).clone())
@@ -443,6 +646,38 @@ impl ObserverSet {
                     age: observer_arc.age,
                     index: observer_arc.index,
                     label,
+                    cluster_observations: observer_arc.cluster_observations.clone(),
+                });
+                self.observers_by_index.insert(index, updated_observer);
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Update cluster observations vector - O(1)
+    pub fn update_cluster_observations(
+        &mut self,
+        index: usize,
+        cluster_observations: Vec<f64>,
+    ) -> bool {
+        if let Some(arc) = self.observers_by_index.get_mut(&index) {
+            if let Some(mut_observer) = Arc::get_mut(arc) {
+                // Exclusive access - update in place (no clone!)
+                mut_observer.cluster_observations = cluster_observations;
+                true
+            } else {
+                // Shared - create new Arc with updated cluster_observations
+                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
+                let updated_observer = Arc::new(Observer {
+                    data: observer_arc.data.clone(),
+                    observations: observer_arc.observations,
+                    time: observer_arc.time,
+                    age: observer_arc.age,
+                    index: observer_arc.index,
+                    label: observer_arc.label,
+                    cluster_observations,
                 });
                 self.observers_by_index.insert(index, updated_observer);
                 true

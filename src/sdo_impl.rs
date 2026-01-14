@@ -5,7 +5,7 @@ use rand::thread_rng;
 use std::f64;
 
 use crate::observer::{Observer, ObserverSet};
-use crate::utils::{compute_distance, DistanceMetric};
+use crate::utils::DistanceMetric;
 
 // SpatialTreeObserver moved to observer_set.rs (now uses HNSW)
 
@@ -153,6 +153,7 @@ impl SDO {
                 age: rows as f64,
                 index: idx,
                 label: None,
+                cluster_observations: Vec::new(),
             };
             self.observers.insert(observer);
         }
@@ -245,10 +246,6 @@ impl SDO {
 }
 
 impl SDO {
-    pub(crate) fn compute_distance(&self, a: &[f64], b: &[f64]) -> f64 {
-        compute_distance(a, b, self.distance_metric, self.minkowski_p)
-    }
-
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)
     pub(crate) fn replace_observer(&mut self, old_index: usize, new_observer: Observer) -> bool {
         self.observers.replace(old_index, new_observer)

@@ -1,8 +1,6 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::observer::ObserverSet;
-use crate::utils::compute_distance;
 
 /// Clustering-Erweiterungen für ObserverSet
 impl ObserverSet {
@@ -10,8 +8,16 @@ impl ObserverSet {
     /// chi: Anzahl der nächsten Observer für lokale Thresholds
     /// zeta: Mixing-Parameter für globale/lokale Thresholds
     /// min_cluster_size: minimale Clustergröße
+    /// write_labels: Wenn true, werden Labels in obs.label geschrieben; sonst nur temporär für interne Verwendung
+    /// Gibt die Cluster-Map zurück: HashMap<label, HashSet<observer_indices>>
     /// Verwendet distance_metric und minkowski_p aus ObserverSet
-    pub fn learn_cluster(&mut self, chi: usize, zeta: f64, min_cluster_size: usize) {
+    pub fn learn_cluster(
+        &mut self,
+        chi: usize,
+        zeta: f64,
+        min_cluster_size: usize,
+        write_labels: bool,
+    ) -> HashMap<i32, HashSet<usize>> {
         // Hole aktive Observer
         let active_observers: Vec<Vec<f64>> = self
             .iter_observers(true)
@@ -20,107 +26,104 @@ impl ObserverSet {
 
         let n = active_observers.len();
         if n == 0 {
-            return;
+            return HashMap::new();
         }
 
         // Hole aktive Observer-Indizes
         let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
 
         if active_indices.len() != n {
-            return; // Mismatch
+            return HashMap::new(); // Mismatch
         }
 
         // Schritt 1: Berechne lokale Cutoff-Thresholds h_ω
-        let mut local_thresholds = vec![0.0; n];
+        // Verwende gecachte Distanzlisten für effiziente Berechnung
+        if self.distance_lists.is_empty() {
+            // Wenn keine Distanzlisten vorhanden, baue sie neu auf
+            self.rebuild_distance_lists();
+        }
 
-        // Verwende Tree für Nearest Neighbor Search wenn möglich
-        {
-            self.ensure_spatial_tree(false);
-            let tree_opt = self.get_spatial_tree(false);
-            if let Some(ref tree_ref) = tree_opt {
-                if tree_ref.is_some() {
-                    // Verwende Tree für Nearest Neighbor Search
-                    for (idx, observer) in active_observers.iter().enumerate() {
-                        let chi_actual = (chi + 1).min(n); // +1 weil wir den Observer selbst ausschließen
-                        let distances =
-                            self.search_k_nearest_distances(observer, chi_actual, false);
-                        if distances.len() >= chi {
-                            local_thresholds[idx] = distances[chi - 1];
-                        } else if !distances.is_empty() {
-                            local_thresholds[idx] = distances[distances.len() - 1];
-                        } else {
-                            local_thresholds[idx] = f64::INFINITY;
-                        }
-                    }
-                } else {
-                    // Fallback zu Brute-Force
-                    self.compute_local_thresholds_brute_force(
-                        &active_observers,
-                        &mut local_thresholds,
-                        chi,
-                    );
-                }
-            } else {
-                // Fallback zu Brute-Force
-                self.compute_local_thresholds_brute_force(
-                    &active_observers,
-                    &mut local_thresholds,
-                    chi,
-                );
-            }
-        } // tree_opt wird hier freigegeben
-
-        // Schritt 2: Berechne globalen Density-Threshold h
-        let global_threshold: f64 =
-            local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
-
-        // Schritt 3: Berechne finale Thresholds mit Mixture-Modell: h'_ω = ζ·h_ω + (1-ζ)·h
-        let final_thresholds: Vec<f64> = local_thresholds
-            .iter()
-            .map(|&h_omega| zeta * h_omega + (1.0 - zeta) * global_threshold)
+        // Sammle lokale Thresholds für globale Berechnung
+        let local_thresholds: Vec<f64> = self
+            .iter_observers(true)
+            .map(|obs| self.compute_local_threshold(obs.index, chi))
             .collect();
 
+        // Schritt 2: Berechne globalen Density-Threshold h
+        let global_threshold: f64 = if !local_thresholds.is_empty() {
+            local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64
+        } else {
+            f64::INFINITY
+        };
+
+        // Schritt 3: Entferne alle Labels von allen Observern
+        let all_indices: Vec<usize> = self.iter_observers(false).map(|obs| obs.index).collect();
+        let all_indices_clone = all_indices.clone();
+        for index in all_indices {
+            self.update_label(index, None);
+        }
+
         // Schritt 4 & 5: Finde Connected Components mit DFS und weise Labels zu
-        let mut visited = vec![false; n];
+        // Iteriere über alle aktiven Observer (nach Index)
+        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+
         let mut current_label = 0i32;
 
-        // DFS für jeden unbesuchten Observer
-        for start_idx in 0..n {
-            if !visited[start_idx] {
-                let mut stack = vec![start_idx];
-                visited[start_idx] = true;
-                // Setze Label direkt im Observer
-                if let Some(&observer_idx) = active_indices.get(start_idx) {
-                    self.update_label(observer_idx, Some(current_label));
-                }
+        // DFS für jeden unbesuchten aktiven Observer
+        for &start_index in &active_indices {
+            // Prüfe ob Observer bereits ein Label hat (besucht)
+            let start_observer = self.observers_by_index.get(&start_index).unwrap();
+            if start_observer.label.is_some() {
+                continue; // Bereits besucht
+            }
 
-                while let Some(current_idx) = stack.pop() {
-                    // Finde alle verbundenen Nachbarn
-                    for neighbor_idx in 0..n {
-                        if neighbor_idx != current_idx && !visited[neighbor_idx] {
-                            // Berechne Distanz
-                            let dist = compute_distance(
-                                &active_observers[current_idx],
-                                &active_observers[neighbor_idx],
-                                self.get_distance_metric(),
-                                self.get_minkowski_p(),
-                            );
-                            // Zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
-                            if dist < final_thresholds[current_idx]
-                                && dist < final_thresholds[neighbor_idx]
-                            {
-                                visited[neighbor_idx] = true;
-                                // Setze Label direkt im Observer
-                                if let Some(&observer_idx) = active_indices.get(neighbor_idx) {
-                                    self.update_label(observer_idx, Some(current_label));
-                                }
-                                stack.push(neighbor_idx);
-                            }
-                        }
+            // Starte neue Connected Component
+            let mut stack = vec![start_index];
+            self.update_label(start_index, Some(current_label));
+
+            while let Some(current_index) = stack.pop() {
+                // Berechne finalen Threshold für den aktuellen Observer
+                let final_threshold_current =
+                    self.compute_final_threshold(current_index, zeta, chi, global_threshold);
+
+                // Sammle potenzielle Nachbarn aus der Distanzliste (nur die, die näher als final_threshold_current sind)
+                let potential_neighbors: Vec<(usize, f64)> = {
+                    if let Some(distance_list) = self.distance_lists.get(&current_index) {
+                        distance_list
+                            .distances
+                            .iter()
+                            .take_while(|(_, dist)| *dist < final_threshold_current)
+                            .filter(|(neighbor_idx, _)| {
+                                // Überspringe sich selbst und prüfe ob aktiv
+                                *neighbor_idx != current_index && self.is_active(*neighbor_idx)
+                            })
+                            .map(|(idx, dist)| (*idx, *dist))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+
+                // Verarbeite potenzielle Nachbarn
+                for (neighbor_index, dist) in potential_neighbors {
+                    // Prüfe ob Nachbar bereits besucht (hat Label)
+                    let neighbor_observer = self.observers_by_index.get(&neighbor_index).unwrap();
+                    if neighbor_observer.label.is_some() {
+                        continue; // Bereits besucht
+                    }
+
+                    // Berechne finalen Threshold für den Nachbar
+                    let final_threshold_neighbor =
+                        self.compute_final_threshold(neighbor_index, zeta, chi, global_threshold);
+
+                    // Zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
+                    if dist < final_threshold_neighbor {
+                        self.update_label(neighbor_index, Some(current_label));
+                        stack.push(neighbor_index);
                     }
                 }
-                current_label += 1;
             }
+            current_label += 1;
         }
 
         // Schritt 6: Entferne kleine Cluster
@@ -153,40 +156,53 @@ impl ObserverSet {
             self.update_label(idx, None);
         }
 
-        // Baue Tree für aktive Observer
-        self.ensure_spatial_tree(true);
+        // Baue Cluster-Map aus Labels
+        let mut cluster_map: HashMap<i32, HashSet<usize>> = HashMap::new();
+        for obs in self.iter_observers(true) {
+            if let Some(label) = obs.label {
+                if label >= 0 {
+                    cluster_map.entry(label).or_default().insert(obs.index);
+                }
+            }
+        }
+
+        // Wenn write_labels=false, entferne Labels wieder (waren nur temporär)
+        if !write_labels {
+            for index in all_indices_clone {
+                self.update_label(index, None);
+            }
+        }
+
+        cluster_map
     }
 
-    /// Berechnet lokale Thresholds mit Brute-Force (Fallback)
-    fn compute_local_thresholds_brute_force(
+    /// Berechnet den finalen Threshold für einen Observer mit Mixture-Modell: h'_ω = ζ·h_ω + (1-ζ)·h
+    fn compute_final_threshold(
         &self,
-        active_observers: &[Vec<f64>],
-        local_thresholds: &mut [f64],
+        index: usize,
+        zeta: f64,
         chi: usize,
-    ) {
-        for (idx, observer) in active_observers.iter().enumerate() {
-            let mut distances: Vec<f64> = active_observers
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != idx)
-                .map(|(_, other)| {
-                    compute_distance(
-                        observer,
-                        other,
-                        self.get_distance_metric(),
-                        self.get_minkowski_p(),
-                    )
-                })
-                .collect();
+        global_threshold: f64,
+    ) -> f64 {
+        let local_threshold = self.compute_local_threshold(index, chi);
+        zeta * local_threshold + (1.0 - zeta) * global_threshold
+    }
 
-            distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-            let chi_actual = chi.min(distances.len());
-            if chi_actual > 0 {
-                local_thresholds[idx] = distances[chi_actual - 1];
-            } else {
-                local_thresholds[idx] = f64::INFINITY;
-            }
+    /// Berechnet den lokalen Threshold für einen einzelnen Observer
+    /// chi: Anzahl der nächsten Observer für lokale Thresholds
+    pub(crate) fn compute_local_threshold(&self, index: usize, chi: usize) -> f64 {
+        let list = self.distance_lists.get(&index).unwrap();
+        let active_distances: Vec<f64> = list
+            .distances
+            .iter()
+            .filter(|(target_idx, _)| self.is_active(*target_idx))
+            .map(|(_, dist)| *dist)
+            .collect();
+        let chi_actual = chi.min(active_distances.len());
+        if chi_actual > 0 {
+            active_distances[chi_actual - 1]
+        } else {
+            f64::INFINITY
         }
     }
 }

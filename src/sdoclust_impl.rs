@@ -112,10 +112,10 @@ impl SDOclust {
         // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
         self.sdo.learn(data, None)?;
 
-        // Führe Clustering durch
+        // Führe Clustering durch (schreibe Labels in obs.label)
         self.sdo
             .observers
-            .learn_cluster(self.chi, self.zeta, self.min_cluster_size);
+            .learn_cluster(self.chi, self.zeta, self.min_cluster_size, true);
 
         Ok(())
     }
