@@ -1,19 +1,21 @@
-mod observer;
-mod observer_clust;
-mod observer_stream;
-mod observer_streamclust;
+mod obs;
+mod obset;
+mod obset_clust;
+mod obset_strcl;
+mod obset_stream;
+mod obset_tree;
 mod sdo_impl;
 mod sdoclust_impl;
+mod sdostrcl_impl;
 mod sdostream_impl;
-mod sdostreamclust_impl;
 mod utils;
 
 use pyo3::prelude::*;
 
 use sdo_impl::SDO;
 use sdoclust_impl::SDOclust;
+use sdostrcl_impl::SDOstreamclust;
 use sdostream_impl::SDOstream;
-use sdostreamclust_impl::SDOstreamclust;
 
 /// Python-Modul
 #[pymodule]

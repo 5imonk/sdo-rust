@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::observer::ObserverSet;
+use crate::obset::ObserverSet;
 
 /// Clustering-Erweiterungen für ObserverSet
 impl ObserverSet {

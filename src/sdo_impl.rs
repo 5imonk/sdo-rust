@@ -4,16 +4,15 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::f64;
 
-use crate::observer::{Observer, ObserverSet};
+use crate::obs::Observer;
+use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
-
-// SpatialTreeObserver moved to observer_set.rs (now uses HNSW)
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
 #[allow(clippy::upper_case_acronyms)]
 pub struct SDO {
-    // Observer-Set, sortiert nach observations (verwendet HNSW intern)
+    // Observer-Set, sortiert nach observations (verwendet Tree oder Brute-Force)
     pub(crate) observers: ObserverSet,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,

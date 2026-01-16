@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use rand::{thread_rng, Rng};
 use std::f64;
 
-use crate::observer::Observer;
+use crate::obs::Observer;
 use crate::sdo_impl::SDO;
 
 impl SDOstream {
@@ -168,13 +168,13 @@ impl SDOstream {
             let minkowski_p = self.sdo.observers.get_minkowski_p();
 
             // Erstelle ObserverSet mit zufälligen Punkten
-            self.sdo.observers = crate::observer::ObserverSet::new();
+            self.sdo.observers = crate::obset::ObserverSet::new();
             self.sdo
                 .observers
                 .set_tree_params(distance_metric, minkowski_p);
 
             for (idx, point_data) in random_data_normal.iter().enumerate() {
-                let observer = crate::observer::Observer {
+                let observer = crate::obs::Observer {
                     data: point_data.clone(),
                     observations: 1.0, // Start mit 1 observation
                     time: t0,

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::observer::{NormalizedScoreKey, ObservationKey, Observer, ObserverSet, OrderedFloat};
+use crate::obs::{NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
+use crate::obset::ObserverSet;
 
 /// Streaming-Erweiterungen für ObserverSet
 /// Enthält Funktionen für zeitbasiertes Fading und Observation-Updates

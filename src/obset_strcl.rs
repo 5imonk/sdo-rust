@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::observer::ObserverSet;
+use crate::obset::ObserverSet;
 
 /// Streaming-Clustering-Erweiterungen für ObserverSet
 /// Enthält Funktionen für Cluster-Formation, Labeling und Lω Updates
