@@ -12,3 +12,10 @@ kiddo = "5.2"
 rand = "0.8"
 pyo3 = { version = "0.21", features = ["auto-initialize", "extension-module"] }
 numpy = "0.21"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "optimization_benchmarks"
+harness = false

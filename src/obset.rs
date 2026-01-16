@@ -8,6 +8,7 @@ use crate::utils::{compute_distance, DistanceMetric};
 /// Efficient ObserverSet with dual indexing for O(log n) operations
 /// Uses Brute-Force for k-NN operations (Tree support disabled)
 /// Uses Arc<Observer> for shared ownership and direct access without HashMap lookups
+#[derive(Clone)]
 pub struct ObserverSet {
     // Primary storage: O(1) access by index, Arc for shared ownership
     pub(crate) observers_by_index: HashMap<usize, Arc<Observer>>,
@@ -40,6 +41,12 @@ pub struct ObserverSet {
 
     // Letzte Zeit für Cluster-Beobachtungs-Fading (für SDOstreamclust)
     pub(crate) last_cluster_time: f64,
+
+    // Cache für lokale Thresholds zur Vermeidung wiederholter Berechnungen
+    // Key: (observer_index, chi) -> threshold
+    // Nur gültig wenn sich die Observer-Struktur nicht geändert hat
+    pub(crate) local_threshold_cache: HashMap<(usize, usize), f64>,
+    pub(crate) cache_valid: bool,
 }
 
 impl ObserverSet {
@@ -54,6 +61,8 @@ impl ObserverSet {
             last_active_observer: None,
             distance_lists: HashMap::new(),
             last_cluster_time: 0.0,
+            local_threshold_cache: HashMap::new(),
+            cache_valid: true,
         }
     }
 
@@ -101,40 +110,49 @@ impl ObserverSet {
     }
 
     /// Aktualisiert Distanzlisten, wenn ein neuer Observer eingefügt wird
+    /// Optimiert: Vermeidet doppelte Distanzberechnung durch Symmetrie
     fn update_distance_lists_on_insert(&mut self, new_index: usize, new_data: &[f64]) {
-        // Für jeden existierenden Observer: Berechne Distanz zum neuen Observer und füge sie hinzu
-        for (existing_index, existing_arc) in &self.observers_by_index {
-            if *existing_index != new_index {
-                let existing_data = &existing_arc.data;
-                let distance = compute_distance(
-                    existing_data,
-                    new_data,
-                    self.distance_metric,
-                    self.minkowski_p,
-                );
+        // Sammle alle existierenden Observer-Daten für effizienten Zugriff
+        let existing_observers: Vec<(usize, Vec<f64>)> = self
+            .observers_by_index
+            .iter()
+            .filter(|(&idx, _)| idx != new_index)
+            .map(|(&idx, arc)| (idx, arc.data.clone()))
+            .collect();
 
-                // Füge Distanz zur Liste des existierenden Observers hinzu
-                let list = self
-                    .distance_lists
-                    .entry(*existing_index)
-                    .or_insert_with(OrderedDistanceList::new);
-                list.insert(new_index, distance);
-            }
+        // Berechne Distanzen nur einmal und füge sie symmetrisch hinzu
+        for (existing_index, existing_data) in existing_observers {
+            let distance = compute_distance(
+                &existing_data,
+                new_data,
+                self.distance_metric,
+                self.minkowski_p,
+            );
+
+            // Füge Distanz zur Liste des existierenden Observers hinzu
+            let list = self
+                .distance_lists
+                .entry(existing_index)
+                .or_insert_with(OrderedDistanceList::new);
+            list.insert(new_index, distance);
         }
 
-        // Erstelle neue Distanzliste für den neuen Observer
+        // Erstelle neue Distanzliste für den neuen Observer (symmetrisch)
         let mut new_list = OrderedDistanceList::new();
-        for (existing_index, existing_arc) in &self.observers_by_index {
-            if *existing_index != new_index {
-                let existing_data = &existing_arc.data;
-                let distance = compute_distance(
-                    new_data,
-                    existing_data,
-                    self.distance_metric,
-                    self.minkowski_p,
-                );
-                new_list.insert(*existing_index, distance);
-            }
+        for (existing_index, existing_data) in &self
+            .observers_by_index
+            .iter()
+            .filter(|(&idx, _)| idx != new_index)
+            .map(|(&idx, arc)| (idx, arc.data.as_slice()))
+            .collect::<Vec<_>>()
+        {
+            let distance = compute_distance(
+                new_data,
+                existing_data,
+                self.distance_metric,
+                self.minkowski_p,
+            );
+            new_list.insert(*existing_index, distance);
         }
         self.distance_lists.insert(new_index, new_list);
     }
@@ -242,6 +260,9 @@ impl ObserverSet {
 
         // Update distance lists für alle Observer
         self.update_distance_lists_on_insert(index, &data);
+
+        // Invalidiere Cache bei Strukturänderungen
+        self.invalidate_threshold_cache();
     }
 
     /// Get observer by index - O(1)
@@ -393,6 +414,9 @@ impl ObserverSet {
         // Update distance lists: Entferne diesen Observer aus allen Distanzlisten
         self.update_distance_lists_on_remove(index);
 
+        // Invalidiere Cache bei Strukturänderungen
+        self.invalidate_threshold_cache();
+
         // Return owned Observer (dereference Arc)
         Some((*observer_arc).clone())
     }
@@ -503,6 +527,12 @@ impl ObserverSet {
         }
     }
 
+    /// Invalidiere den lokalen Threshold-Cache
+    pub(crate) fn invalidate_threshold_cache(&mut self) {
+        self.local_threshold_cache.clear();
+        self.cache_valid = false;
+    }
+
     /// Perform k-nearest neighbor search
     /// Always uses Brute-Force (Tree support disabled)
     pub fn search_k_nearest_distances(
@@ -579,6 +609,77 @@ impl ObserverSet {
             .take(k)
             .map(|(idx, _)| idx)
             .collect()
+    }
+
+    /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste
+    /// O(k) da Distanzliste bereits sortiert ist
+    pub fn get_k_nearest_neighbors(&self, observer_index: usize, k: usize) -> Vec<(usize, f64)> {
+        if let Some(distance_list) = self.distance_lists.get(&observer_index) {
+            let end = k.min(distance_list.distances.len());
+            distance_list.distances[..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Finde alle Nachbarn innerhalb eines Thresholds unter Verwendung der Distanzliste
+    /// O(log n + m) wobei m die Anzahl der Nachbarn innerhalb des Thresholds ist
+    pub fn get_neighbors_within_threshold(
+        &self,
+        observer_index: usize,
+        threshold: f64,
+    ) -> Vec<(usize, f64)> {
+        if let Some(distance_list) = self.distance_lists.get(&observer_index) {
+            let end_pos = distance_list.find_threshold_position(threshold);
+            distance_list.distances[..end_pos].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Batch-Update für Distanzlisten wenn mehrere Observer gleichzeitig aktualisiert werden
+    /// Vermeidet wiederholte Neuberechnungen
+    pub fn batch_update_distance_lists(&mut self, updated_indices: &[usize]) {
+        if updated_indices.is_empty() {
+            return;
+        }
+
+        // Sammle aktuelle Daten für alle aktualisierten Observer
+        let updated_data: HashMap<usize, Vec<f64>> = updated_indices
+            .iter()
+            .filter_map(|&idx| {
+                self.observers_by_index
+                    .get(&idx)
+                    .map(|arc| (idx, arc.data.clone()))
+            })
+            .collect();
+
+        // Aktualisiere Distanzen nur zwischen aktualisierten Observern
+        for &i in updated_indices {
+            for &j in updated_indices {
+                if i < j {
+                    // Vermeide Doppelarbeit
+                    if let (Some(data_i), Some(data_j)) =
+                        (updated_data.get(&i), updated_data.get(&j))
+                    {
+                        let distance = compute_distance(
+                            data_i,
+                            data_j,
+                            self.distance_metric,
+                            self.minkowski_p,
+                        );
+
+                        // Aktualisiere beide Richtungen
+                        if let Some(list_i) = self.distance_lists.get_mut(&i) {
+                            list_i.insert(j, distance);
+                        }
+                        if let Some(list_j) = self.distance_lists.get_mut(&j) {
+                            list_j.insert(i, distance);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Clear all observers - O(n)

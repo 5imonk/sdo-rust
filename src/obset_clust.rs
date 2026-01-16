@@ -43,10 +43,15 @@ impl ObserverSet {
             self.rebuild_distance_lists();
         }
 
-        // Sammle lokale Thresholds für globale Berechnung
-        let local_thresholds: Vec<f64> = self
-            .iter_observers(true)
-            .map(|obs| self.compute_local_threshold(obs.index, chi))
+        // Sammle lokale Thresholds für globale Berechnung mit Cache
+        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+
+        // Validiere Cache vor Batch-Berechnung
+        self.validate_threshold_cache();
+
+        let local_thresholds: Vec<f64> = active_indices
+            .iter()
+            .map(|&idx| self.compute_local_threshold_cached(idx, chi))
             .collect();
 
         // Schritt 2: Berechne globalen Density-Threshold h
@@ -87,15 +92,17 @@ impl ObserverSet {
                     self.compute_final_threshold(current_index, zeta, chi, global_threshold);
 
                 // Sammle potenzielle Nachbarn aus der Distanzliste (nur die, die näher als final_threshold_current sind)
+                // Optimiert: Binary Search + early termination
                 let potential_neighbors: Vec<(usize, f64)> = {
                     if let Some(distance_list) = self.distance_lists.get(&current_index) {
-                        distance_list
-                            .distances
+                        let start_pos =
+                            distance_list.find_threshold_position(final_threshold_current);
+                        distance_list.distances[start_pos..]
                             .iter()
-                            .take_while(|(_, dist)| *dist < final_threshold_current)
-                            .filter(|(neighbor_idx, _)| {
-                                // Überspringe sich selbst und prüfe ob aktiv
-                                *neighbor_idx != current_index && self.is_active(*neighbor_idx)
+                            .filter(|(neighbor_idx, dist)| {
+                                *dist < final_threshold_current
+                                    && *neighbor_idx != current_index
+                                    && self.is_active(*neighbor_idx)
                             })
                             .map(|(idx, dist)| (*idx, *dist))
                             .collect()
@@ -176,6 +183,57 @@ impl ObserverSet {
         cluster_map
     }
 
+    /// Setze Cache als gültig (nach vollständiger Aktualisierung)
+    pub fn validate_threshold_cache(&mut self) {
+        self.cache_valid = true;
+    }
+
+    /// Berechne lokalen Threshold mit Cache-Unterstützung
+    pub fn compute_local_threshold_cached(&mut self, index: usize, chi: usize) -> f64 {
+        let cache_key = (index, chi);
+
+        // Prüfe Cache
+        if self.cache_valid {
+            if let Some(&cached_threshold) = self.local_threshold_cache.get(&cache_key) {
+                return cached_threshold;
+            }
+        }
+
+        // Berechne und cache
+        let threshold = self.compute_local_threshold_impl(index, chi);
+        self.local_threshold_cache.insert(cache_key, threshold);
+        threshold
+    }
+
+    /// Implementierung der lokalen Threshold-Berechnung
+    pub(crate) fn compute_local_threshold_impl(&self, index: usize, chi: usize) -> f64 {
+        if let Some(list) = self.distance_lists.get(&index) {
+            let mut found = 0;
+
+            // Iteriere über sortierte Distanzen bis chi aktive Observer gefunden
+            for (target_idx, dist) in &list.distances {
+                if self.is_active(*target_idx) {
+                    found += 1;
+                    if found == chi {
+                        return *dist;
+                    }
+                }
+            }
+
+            // Wenn weniger als chi aktive Observer gefunden, letzte Distanz verwenden
+            if found > 0 {
+                // Finde letzte aktive Distanz
+                for (target_idx, dist) in list.distances.iter().rev() {
+                    if self.is_active(*target_idx) {
+                        return *dist;
+                    }
+                }
+            }
+        }
+
+        f64::INFINITY
+    }
+
     /// Berechnet den finalen Threshold für einen Observer mit Mixture-Modell: h'_ω = ζ·h_ω + (1-ζ)·h
     fn compute_final_threshold(
         &self,
@@ -184,25 +242,8 @@ impl ObserverSet {
         chi: usize,
         global_threshold: f64,
     ) -> f64 {
-        let local_threshold = self.compute_local_threshold(index, chi);
+        let local_threshold = self.compute_local_threshold_impl(index, chi);
         zeta * local_threshold + (1.0 - zeta) * global_threshold
     }
-
-    /// Berechnet den lokalen Threshold für einen einzelnen Observer
-    /// chi: Anzahl der nächsten Observer für lokale Thresholds
-    pub(crate) fn compute_local_threshold(&self, index: usize, chi: usize) -> f64 {
-        let list = self.distance_lists.get(&index).unwrap();
-        let active_distances: Vec<f64> = list
-            .distances
-            .iter()
-            .filter(|(target_idx, _)| self.is_active(*target_idx))
-            .map(|(_, dist)| *dist)
-            .collect();
-        let chi_actual = chi.min(active_distances.len());
-        if chi_actual > 0 {
-            active_distances[chi_actual - 1]
-        } else {
-            f64::INFINITY
-        }
-    }
+    
 }

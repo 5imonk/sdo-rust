@@ -1,5 +1,5 @@
-mod obs;
-mod obset;
+pub mod obs;
+pub mod obset;
 mod obset_clust;
 mod obset_strcl;
 mod obset_stream;
@@ -7,7 +7,10 @@ mod sdo_impl;
 mod sdoclust_impl;
 mod sdostrcl_impl;
 mod sdostream_impl;
-mod utils;
+pub mod utils;
+
+#[cfg(test)]
+mod optimization_tests;
 
 use pyo3::prelude::*;
 

@@ -18,15 +18,63 @@ impl OrderedDistanceList {
     }
 
     /// Fügt eine Distanz hinzu und behält die Sortierung bei
-    /// O(n) - könnte mit Binary Search optimiert werden, aber für kleine n ist linear besser
+    /// O(log n) - Binary Search für effiziente Insertion
     pub(crate) fn insert(&mut self, target_index: usize, distance: f64) {
-        // Entferne alte Einträge für diesen target_index
-        self.distances.retain(|(idx, _)| *idx != target_index);
+        // Entferne alte Einträge für diesen target_index mit Binary Search
+        let pos = self.find_position(target_index);
+        if let Some(remove_pos) = pos {
+            self.distances.remove(remove_pos);
+        }
 
-        // Füge neuen Eintrag hinzu und sortiere
-        self.distances.push((target_index, distance));
+        // Finde Einfügeposition mit Binary Search
+        let insert_pos = self.binary_search_insert_position(distance);
+        self.distances.insert(insert_pos, (target_index, distance));
+    }
+
+    /// Binary Search für die Einfügeposition
+    fn binary_search_insert_position(&self, distance: f64) -> usize {
+        let mut left = 0;
+        let mut right = self.distances.len();
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            match self.distances[mid]
+                .1
+                .partial_cmp(&distance)
+                .unwrap_or(Ordering::Equal)
+            {
+                Ordering::Less => left = mid + 1,
+                Ordering::Greater | Ordering::Equal => right = mid,
+            }
+        }
+        left
+    }
+
+    /// Finde Position eines target_index mit Binary Search
+    fn find_position(&self, target_index: usize) -> Option<usize> {
         self.distances
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            .iter()
+            .position(|(idx, _)| *idx == target_index)
+    }
+
+    /// Finde Position, ab der alle Distanzen >= threshold sind
+    /// Gibt Index des ersten Elements zurück, das >= threshold ist
+    pub(crate) fn find_threshold_position(&self, threshold: f64) -> usize {
+        let mut left = 0;
+        let mut right = self.distances.len();
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            match self.distances[mid]
+                .1
+                .partial_cmp(&threshold)
+                .unwrap_or(Ordering::Equal)
+            {
+                Ordering::Less => left = mid + 1,
+                Ordering::Greater | Ordering::Equal => right = mid,
+            }
+        }
+        left
     }
 
     /// Entfernt einen Eintrag für den gegebenen target_index

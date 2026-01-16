@@ -106,7 +106,7 @@ T = 400 # Time Horizon (t_fading)
 T_sampling = 250 # Sampling Interval (t_sampling)
 x_neighbors = 4 # Anzahl nächster Nachbarn
 chi_min = 1 # Minimum chi value
-chi_prop = 0.1 # Proportion of k for chi calculation
+chi_prop = 0.05 # Proportion of k for chi calculation
 zeta = 0.6 # Mixing-Parameter
 min_cluster_size = 2 # Minimale Clustergröße
 
