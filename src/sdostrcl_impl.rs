@@ -10,7 +10,9 @@ use crate::sdostream_impl::SDOstream;
 #[allow(clippy::upper_case_acronyms)]
 pub struct SDOstreamclust {
     sdostream: SDOstream, // Basis SDOstream-Implementierung
-    chi: usize,
+    chi_min: usize,       // Minimum chi value
+    chi_prop: f64,        // Proportion of k for chi calculation
+    k: usize,             // Anzahl der Observer (für chi Berechnung)
     zeta: f64,
     min_cluster_size: usize,
 }
@@ -19,12 +21,14 @@ pub struct SDOstreamclust {
 #[allow(clippy::too_many_arguments)]
 impl SDOstreamclust {
     #[new]
-    #[pyo3(signature = (k, x, t_fading, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None, use_brute_force = false))]
+    #[pyo3(signature = (k, x, t_fading, t_sampling = None, chi_min = 1, chi_prop = 0.05, zeta = 0.6, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None))]
     pub fn new(
         k: usize,
         x: usize,
         t_fading: f64,
-        chi: usize,
+        t_sampling: Option<f64>,
+        chi_min: usize,
+        chi_prop: f64,
         zeta: f64,
         min_cluster_size: usize,
         distance: String,
@@ -33,7 +37,6 @@ impl SDOstreamclust {
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
-        use_brute_force: bool,
     ) -> PyResult<Self> {
         // Check if initialization is needed before moving values
         let needs_init = data.is_some() || dimension.is_some() || time.is_some();
@@ -43,15 +46,17 @@ impl SDOstreamclust {
                 k,
                 x,
                 t_fading,
+                t_sampling,
                 distance,
                 minkowski_p,
                 rho,
-                dimension.clone(),
+                dimension,
                 data.clone(),
                 time.clone(),
-                use_brute_force,
             )?,
-            chi,
+            chi_min,
+            chi_prop,
+            k,
             zeta,
             min_cluster_size,
         };
@@ -102,8 +107,10 @@ impl SDOstreamclust {
         self.sdostream.learn(point, time)?;
 
         // Schritt 2: Cluster (Algorithmus 3.3) - verwende learn_cluster direkt
+        // Berechne chi: chi = max(chi_min, chi_prop * k)
+        let chi = (self.chi_min as f64).max(self.chi_prop * (self.k as f64)) as usize;
         let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
-            self.chi,
+            chi,
             self.zeta,
             self.min_cluster_size,
             false,
@@ -184,11 +191,13 @@ impl SDOstreamclust {
 impl Default for SDOstreamclust {
     fn default() -> Self {
         Self::new(
-            10,
+            200,
             5,
             100.0,
-            4,
-            0.5,
+            None, // t_sampling = t_fading
+            1,    // chi_min
+            0.05, // chi_prop
+            0.6,
             2,
             "euclidean".to_string(),
             None,
@@ -196,7 +205,6 @@ impl Default for SDOstreamclust {
             None,
             None,
             None,
-            false,
         )
         .unwrap()
     }

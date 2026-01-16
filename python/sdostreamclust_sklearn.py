@@ -21,27 +21,31 @@ class SDOstreamclustClusterer:
     
     Parameters
     ----------
-    k : int, default=10
+    k : int, default=300
         Anzahl der Observer (Modellgröße). Muss fest sein für Streaming.
     
+    t_fading : float, default=500.0
+        Characteristic time für das Modell (T-Parameter für fading).
+        Größere Werte bedeuten langsamere Anpassung an neue Daten.
+        Increasing T makes the model adjust slower, decreasing T makes it adjust quicker.
+    
     x : int, default=5
-        Anzahl der nächsten Nachbarn für Observations und Predictions.
+        Anzahl der nächsten Observer für Clustering (Anzahl der nächsten Nachbarn).
     
-    t_fading : float, default=10.0
-        T-Parameter für fading: f = exp(-T_fading^-1). Größere Werte bedeuten
-        langsamere Anpassung an neue Daten.
+    chi_min : int, default=1
+        Minimum chi value. chi wird berechnet als max(chi_min, chi_prop * k).
     
-
+    chi_prop : float, default=0.05
+        Proportion of k for chi calculation. chi wird berechnet als max(chi_min, chi_prop * k).
     
-    chi : int, default=4
-        Anzahl der nächsten Observer für lokale Cutoff-Thresholds (χ).
-    
-    zeta : float, default=0.5
+    zeta : float, default=0.6
+        Determines ratio between local h and global h that determines h for each Observer.
         Mixing-Parameter für globale/lokale Thresholds (0.0-1.0).
         Höhere Werte betonen lokale Thresholds mehr.
     
     min_cluster_size : int, default=2
-        Minimale Clustergröße (e). Cluster mit weniger Observer werden entfernt.
+        Minimum size of a cluster (e). Cluster mit weniger Observer werden entfernt.
+        Minimum amount of Observers spanning / representing a cluster.
     
     distance : str, default="euclidean"
         Distanzmetrik: "euclidean", "manhattan", "chebyshev", "minkowski"
@@ -63,7 +67,7 @@ class SDOstreamclustClusterer:
     >>> import numpy as np
     >>> 
     >>> # Erstelle Clusterer
-    >>> clusterer = SDOstreamclustClusterer(k=10, x=5, t_fading=10.0)
+    >>> clusterer = SDOstreamclustClusterer(k=300, x=5, t_fading=500.0, t_sampling=500.0)
     >>> 
     >>> # Initialisiere mit Daten (optional)
     >>> X_init = np.array([[1, 2], [2, 3], [10, 11]], dtype=np.float64)
@@ -77,51 +81,56 @@ class SDOstreamclustClusterer:
     
     def __init__(
         self,
-        k=10,
+        k=300,
         x=5,
-        t_fading=10.0,
-        chi=4,
-        zeta=0.5,
+        t_fading=500.0,
+        t_sampling=None,
+        chi_min=1,
+        chi_prop=0.05,
+        zeta=0.6,
         min_cluster_size=2,
         distance="euclidean",
         minkowski_p=None,
-        use_brute_force=False,
     ):
         """
         Initialisiere den SDOstreamclust Clusterer.
         
         Parameters
         ----------
-        k : int, default=10
+        k : int, default=300
             Anzahl der Observer (Modellgröße).
         x : int, default=5
-            Anzahl der nächsten Nachbarn für Observations.
-        t_fading : float, default=10.0
-            T-Parameter für fading: f = exp(-T_fading^-1).
-            Die Sampling-Rate wird automatisch als t_fading/k berechnet.
-        chi : int, default=4
-            Anzahl der nächsten Observer für lokale Thresholds.
-        zeta : float, default=0.5
+            Anzahl der nächsten Nachbarn für Observations und Clustering.
+        t_fading : float, default=500.0
+            Characteristic time für das Modell (T-Parameter für fading).
+            Größere Werte bedeuten langsamere Anpassung an neue Daten.
+        t_sampling : float, optional, default=None
+            Characteristic time für Sampling-Rate (durchschnittliches Intervall zwischen Ersetzungen).
+            Wenn None, wird t_fading verwendet.
+        chi_min : int, default=1
+            Minimum chi value. chi wird berechnet als max(chi_min, chi_prop * k).
+        chi_prop : float, default=0.05
+            Proportion of k for chi calculation. chi wird berechnet als max(chi_min, chi_prop * k).
+        zeta : float, default=0.6
+            Determines ratio between local h and global h that determines h for each Observer.
             Mixing-Parameter für globale/lokale Thresholds.
         min_cluster_size : int, default=2
-            Minimale Clustergröße.
+            Minimum size of a cluster (e). Minimale Clustergröße.
         distance : str, default="euclidean"
             Distanzmetrik.
         minkowski_p : float, optional
             p-Parameter für Minkowski-Distanz.
-        use_brute_force : bool, default=False
-            Wenn True, wird immer Brute-Force statt des Spatial Trees verwendet.
-            Dies vermeidet Probleme mit Duplikaten, ist aber langsamer für große Datensätze.
         """
         self.k = k
         self.x = x
         self.t_fading = t_fading
-        self.chi = chi
+        self.t_sampling = t_sampling if t_sampling is not None else t_fading
+        self.chi_min = chi_min
+        self.chi_prop = chi_prop
         self.zeta = zeta
         self.min_cluster_size = min_cluster_size
         self.distance = distance
         self.minkowski_p = minkowski_p
-        self.use_brute_force = use_brute_force
         self.sdostreamclust_ = None
         self.n_features_in_ = None
     
@@ -158,14 +167,15 @@ class SDOstreamclustClusterer:
             k=self.k,
             x=self.x,
             t_fading=self.t_fading,
-            chi=self.chi,
+            t_sampling=self.t_sampling if self.t_sampling != self.t_fading else None,
+            chi_min=self.chi_min,
+            chi_prop=self.chi_prop,
             zeta=self.zeta,
             min_cluster_size=self.min_cluster_size,
             distance=self.distance,
             minkowski_p=self.minkowski_p,
             data=X,
             time=time_array[0:1] if time_array is not None and len(time_array) == 1 else None,
-            use_brute_force=self.use_brute_force,
         )
         
         return self
@@ -363,7 +373,8 @@ class SDOstreamclustClusterer:
         """String-Repräsentation des Objekts."""
         return (
             f"SDOstreamclustClusterer(k={self.k}, x={self.x}, t_fading={self.t_fading:.2f}, "
-            f"chi={self.chi}, zeta={self.zeta:.2f}, min_cluster_size={self.min_cluster_size})"
+            f"t_sampling={self.t_sampling:.2f}, chi_min={self.chi_min}, chi_prop={self.chi_prop:.3f}, "
+            f"zeta={self.zeta:.2f}, min_cluster_size={self.min_cluster_size})"
         )
 
 
@@ -375,8 +386,8 @@ if __name__ == "__main__":
     
     # Erstelle Clusterer
     clusterer = SDOstreamclustClusterer(
-        k=10, x=5, t_fading=10.0,
-        chi=4, zeta=0.5, min_cluster_size=2
+        k=300, x=5, t_fading=500.0, t_sampling=500.0,
+        chi_min=1, chi_prop=0.05, zeta=0.6, min_cluster_size=2
     )
     print(f"\nClusterer: {clusterer}")
     

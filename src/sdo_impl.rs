@@ -12,7 +12,7 @@ use crate::utils::DistanceMetric;
 #[pyclass]
 #[allow(clippy::upper_case_acronyms)]
 pub struct SDO {
-    // Observer-Set, sortiert nach observations (verwendet Tree oder Brute-Force)
+    // Observer-Set, sortiert nach observations (verwendet immer Brute-Force)
     pub(crate) observers: ObserverSet,
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
@@ -25,8 +25,8 @@ pub struct SDO {
 #[pymethods]
 impl SDO {
     #[new]
-    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None, use_brute_force = false))]
-    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>, use_brute_force: bool) -> Self {
+    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None))]
+    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>) -> Self {
         let distance_metric = match distance.to_lowercase().as_str() {
             "manhattan" => DistanceMetric::Manhattan,
             "chebyshev" => DistanceMetric::Chebyshev,
@@ -42,7 +42,9 @@ impl SDO {
             x,
             k,
         };
-        instance.observers.set_use_brute_force(use_brute_force);
+        instance
+            .observers
+            .set_tree_params(distance_metric, minkowski_p);
         instance
     }
 
@@ -207,6 +209,6 @@ impl SDO {
 
 impl Default for SDO {
     fn default() -> Self {
-        Self::new(10, 5, 0.2, "euclidean".to_string(), None, false)
+        Self::new(200, 5, 0.2, "euclidean".to_string(), None)
     }
 }

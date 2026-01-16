@@ -18,6 +18,7 @@ except ImportError:
     sys.exit(1)
 
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
 def test_basic_streaming_clustering():
     """Test grundlegende Streaming-Clustering-Funktionalität"""
@@ -30,6 +31,10 @@ def test_basic_streaming_clustering():
     cluster1 = np.random.randn(5, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(5, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = np.vstack([cluster1, cluster2]).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
     
     print(f"Initialisierungsdaten: {init_data.shape[0]} Punkte, {init_data.shape[1]} Dimensionen")
     
@@ -73,6 +78,10 @@ def test_cluster_evolution():
     # Initialisiere
     np.random.seed(42)
     init_data = np.random.randn(10, 2).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
     
     sdostream = SDOstream(
         k=3, x=2, t_fading=10.0,
@@ -121,6 +130,10 @@ def test_different_parameters():
     cluster1 = np.random.randn(8, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(8, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = np.vstack([cluster1, cluster2]).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
     
     param_sets = [
         {"t_fading": 5.0, "name": "Konservativ"},

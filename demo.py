@@ -40,8 +40,9 @@ for data_path in data_paths:
                 df_data.drop(columns=['class'], inplace=True)
                 x = df_data.to_numpy().astype(np.float64)
                 
-                # Normalisiere Daten (optional)
-                # x = MinMaxScaler().fit_transform(x)
+                # Normalisiere Daten
+                scaler = MinMaxScaler()
+                x = scaler.fit_transform(x)
                 
                 # Konvertiere Labels zu int (falls String/Bytes)
                 if y.dtype == object:
@@ -73,6 +74,9 @@ for data_path in data_paths:
             t = df['timestamp'].to_numpy()
             x = df[['f0','f1']].to_numpy()
             y = df['label'].to_numpy()
+            # Normalisiere Daten
+            scaler = MinMaxScaler()
+            x = scaler.fit_transform(x)
             data_loaded = True
             print(f"✓ Daten geladen: {len(x)} Punkte, {x.shape[1]} Dimensionen")
             break
@@ -90,24 +94,31 @@ if not data_loaded:
     cluster2 = np.random.randn(n_points // 2, 2) * 0.5 + np.array([8.0, 8.0])
     x = np.vstack([cluster1, cluster2]).astype(np.float64)
     
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    x = scaler.fit_transform(x)
+    
     # Labels: 0 für Cluster 1, 1 für Cluster 2
     y = np.concatenate([np.zeros(n_points // 2), np.ones(n_points // 2)]).astype(int)
 
-k = 50 # Model size (reduziert für Demo)
+k = 200 # Model size (reduziert für Demo)
 T = 400 # Time Horizon (t_fading)
-x_neighbors = 5 # Anzahl nächster Nachbarn
-chi = 4 # Lokale Threshold-Parameter
-zeta = 0.5 # Mixing-Parameter
+T_sampling = 250 # Sampling Interval (t_sampling)
+x_neighbors = 4 # Anzahl nächster Nachbarn
+chi_min = 1 # Minimum chi value
+chi_prop = 0.1 # Proportion of k for chi calculation
+zeta = 0.6 # Mixing-Parameter
 min_cluster_size = 2 # Minimale Clustergröße
 
 classifier = SDOstreamclustClusterer(
     k=k, 
     x=x_neighbors, 
     t_fading=T,
-    chi=chi,
+    t_sampling=T,
+    chi_min=chi_min,
+    chi_prop=chi_prop,
     zeta=zeta,
     min_cluster_size=min_cluster_size,
-    use_brute_force=True  # Vermeidet Probleme mit Duplikaten
 )
 
 all_predic = []

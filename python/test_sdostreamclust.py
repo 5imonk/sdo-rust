@@ -18,6 +18,7 @@ except ImportError:
     sys.exit(1)
 
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
 def test_basic_streaming_clustering():
     """Test grundlegende Streaming-Clustering-Funktionalität"""
@@ -31,11 +32,15 @@ def test_basic_streaming_clustering():
     cluster2 = np.random.randn(5, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = np.vstack([cluster1, cluster2]).astype(np.float64)
     
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
+    
     print(f"Initialisierungsdaten: {init_data.shape[0]} Punkte, {init_data.shape[1]} Dimensionen")
     
     sdostreamclust = SDOstreamclust(
         k=10, x=3, t_fading=10.0,
-        chi=4, zeta=0.5, min_cluster_size=2,
+        chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
         data=init_data
     )
     print(f"✓ Modell initialisiert")
@@ -73,9 +78,13 @@ def test_cluster_evolution():
     np.random.seed(42)
     init_data = np.random.randn(10, 2).astype(np.float64)
     
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
+    
     sdostreamclust = SDOstreamclust(
         k=3, x=2, t_fading=10.0,
-        chi=4, zeta=0.5, min_cluster_size=2,
+        chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
         data=init_data
     )
     
@@ -83,6 +92,7 @@ def test_cluster_evolution():
     
     # Phase 1: Cluster 1 (Punkte um [3, 3])
     cluster1_points = np.random.randn(5, 2) * 0.5 + np.array([3.0, 3.0])
+    cluster1_points = scaler.transform(cluster1_points)
     for i in range(5):
         point = cluster1_points[i:i+1, :]
         old_label = sdostreamclust.predict(point)
@@ -92,6 +102,7 @@ def test_cluster_evolution():
     
     # Phase 2: Cluster 2 erscheint (Punkte um [10, 10])
     cluster2_points = np.random.randn(5, 2) * 0.5 + np.array([10.0, 10.0])
+    cluster2_points = scaler.transform(cluster2_points)
     for i in range(5):
         point = cluster2_points[i:i+1, :]
         old_label = sdostreamclust.predict(point)
@@ -101,6 +112,7 @@ def test_cluster_evolution():
     
     # Phase 3: Gemischte Punkte
     mixed_points = np.random.randn(3, 2) * 0.5 + np.array([3.0, 3.0])
+    mixed_points = scaler.transform(mixed_points)
     for i in range(3):
         point = mixed_points[i:i+1, :]
         old_label = sdostreamclust.predict(point)

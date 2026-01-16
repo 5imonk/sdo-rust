@@ -22,7 +22,7 @@ pub struct SDOclust {
 #[allow(clippy::too_many_arguments)]
 impl SDOclust {
     #[new]
-    #[pyo3(signature = (k, x, rho, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, use_brute_force = false))]
+    #[pyo3(signature = (k, x, rho, chi = 4, zeta = 0.5, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None))]
     pub fn new(
         k: usize,
         x: usize,
@@ -32,10 +32,9 @@ impl SDOclust {
         min_cluster_size: usize,
         distance: String,
         minkowski_p: Option<f64>,
-        use_brute_force: bool,
     ) -> Self {
         Self {
-            sdo: SDO::new(k, x, rho, distance, minkowski_p, use_brute_force),
+            sdo: SDO::new(k, x, rho, distance, minkowski_p),
             chi,
             zeta,
             min_cluster_size,
@@ -148,6 +147,6 @@ impl SDOclust {
 
 impl Default for SDOclust {
     fn default() -> Self {
-        Self::new(10, 5, 0.2, 4, 0.5, 2, "euclidean".to_string(), None, false)
+        Self::new(200, 5, 0.2, 4, 0.5, 2, "euclidean".to_string(), None)
     }
 }

@@ -3,7 +3,6 @@ mod obset;
 mod obset_clust;
 mod obset_strcl;
 mod obset_stream;
-mod obset_tree;
 mod sdo_impl;
 mod sdoclust_impl;
 mod sdostrcl_impl;

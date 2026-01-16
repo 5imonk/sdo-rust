@@ -5,6 +5,7 @@ Vollständiges Testskript für SDOclust (Sparse Data Observers Clustering)
 
 import numpy as np
 from sdo import SDOclust
+from sklearn.preprocessing import MinMaxScaler
 
 def test_basic_clustering():
     """Grundlegende Clustering-Funktionalität"""
@@ -17,6 +18,10 @@ def test_basic_clustering():
     cluster1 = np.random.randn(30, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(30, 2) * 0.5 + np.array([8.0, 8.0])
     data = np.vstack([cluster1, cluster2]).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
     
     print(f"Trainingsdaten: {data.shape[0]} Punkte, {data.shape[1]} Dimensionen")
     print(f"  - Cluster 1: 30 Punkte um [2, 2]")
@@ -221,6 +226,8 @@ def test_edge_cases():
     # Test 1: Sehr wenige Daten
     print("Test 6.1: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float64)
+    scaler = MinMaxScaler()
+    few_data = scaler.fit_transform(few_data)
     sdoclust = SDOclust(k=2, x=1, rho=0.1, chi=1, zeta=0.5, min_cluster_size=1)
     try:
         sdoclust.learn(few_data)
@@ -232,6 +239,8 @@ def test_edge_cases():
     print("\nTest 6.2: Einzelner kompakter Cluster")
     np.random.seed(42)
     single_cluster = np.random.randn(30, 2) * 0.3 + np.array([5.0, 5.0])
+    scaler = MinMaxScaler()
+    single_cluster = scaler.fit_transform(single_cluster)
     sdoclust = SDOclust(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(single_cluster)
     print(f"  ✓ Einzelner Cluster: {sdoclust.n_clusters()} Cluster gefunden")
@@ -240,6 +249,8 @@ def test_edge_cases():
     print("\nTest 6.3: Hoher min_cluster_size")
     np.random.seed(42)
     data = np.random.randn(20, 2).astype(np.float64)
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
     sdoclust = SDOclust(k=10, x=3, rho=0.2, chi=2, zeta=0.5, min_cluster_size=10)
     sdoclust.learn(data)
     print(f"  ✓ Hoher min_cluster_size: {sdoclust.n_clusters()} Cluster")

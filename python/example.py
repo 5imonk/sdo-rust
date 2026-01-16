@@ -5,6 +5,7 @@ Erweiterte Beispiele für die Verwendung von SDO, SDOclust und SDOstream
 
 import numpy as np
 from sdo import SDO, SDOclust, SDOstream
+from sklearn.preprocessing import MinMaxScaler
 
 
 def example_sdo():
@@ -22,6 +23,10 @@ def example_sdo():
         [20.0, 20.0],
     ])
     data = np.vstack([normal_data, outlier_data]).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
     
     print(f"\nDaten: {data.shape[0]} Punkte, {data.shape[1]} Dimensionen")
     print(f"  - Normale Punkte: {len(normal_data)}")
@@ -80,6 +85,10 @@ def example_sdoclust():
     cluster1 = np.random.randn(30, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(30, 2) * 0.5 + np.array([8.0, 8.0])
     data = np.vstack([cluster1, cluster2]).astype(np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
     
     print(f"\nDaten: {data.shape[0]} Punkte, {data.shape[1]} Dimensionen")
     print(f"  - Cluster 1: 30 Punkte um [2, 2]")
@@ -143,6 +152,10 @@ def example_sdostream():
     init_data = np.random.randn(10, 2) * 1.0 + np.array([3.0, 3.0])
     init_data = init_data.astype(np.float64)
     
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    init_data = scaler.fit_transform(init_data)
+    
     print(f"\nInitialisierungsdaten: {init_data.shape[0]} Punkte")
     
     sdostream = SDOstream(k=10, x=5, t_fading=10.0, data=init_data)
@@ -201,7 +214,11 @@ def example_comparison():
     outlier_data = np.array([[15.0, 15.0], [-5.0, -5.0]])
     data = np.vstack([normal_data, outlier_data]).astype(np.float64)
     
-    test_point = np.array([[15.0, 15.0]], dtype=np.float64)
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
+    
+    test_point = scaler.transform(np.array([[15.0, 15.0]], dtype=np.float64))
     
     print(f"\nDaten: {data.shape[0]} Punkte")
     print(f"Test-Punkt (Outlier): [{test_point[0,0]}, {test_point[0,1]}]")

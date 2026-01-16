@@ -3,11 +3,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::obs::{NormalizedScoreKey, ObservationKey, Observer, OrderedDistanceList, OrderedFloat};
-use crate::obset_tree::ObserverSetTree;
 use crate::utils::{compute_distance, DistanceMetric};
 
 /// Efficient ObserverSet with dual indexing for O(log n) operations
-/// Includes spatial tree for efficient k-NN operations
+/// Uses Brute-Force for k-NN operations (Tree support disabled)
 /// Uses Arc<Observer> for shared ownership and direct access without HashMap lookups
 pub struct ObserverSet {
     // Primary storage: O(1) access by index, Arc for shared ownership
@@ -22,9 +21,6 @@ pub struct ObserverSet {
     // Key: (normalized_score, index) -> index
     // This allows O(log n) finding of worst observer
     pub(crate) indices_by_score: BTreeMap<NormalizedScoreKey, usize>,
-
-    // Tree-bezogene Funktionalität (optional, nur wenn Tree verwendet wird)
-    tree: Option<ObserverSetTree>,
 
     // Parameters for distance computation
     distance_metric: DistanceMetric,
@@ -44,9 +40,6 @@ pub struct ObserverSet {
 
     // Letzte Zeit für Cluster-Beobachtungs-Fading (für SDOstreamclust)
     pub(crate) last_cluster_time: f64,
-
-    // Flag: Wenn true, wird immer Brute-Force statt Spatial Tree verwendet
-    use_brute_force: bool,
 }
 
 impl ObserverSet {
@@ -55,37 +48,19 @@ impl ObserverSet {
             observers_by_index: HashMap::new(),
             indices_by_obs: BTreeMap::new(),
             indices_by_score: BTreeMap::new(),
-            tree: Some(ObserverSetTree::new()), // Tree standardmäßig aktiviert
             distance_metric: DistanceMetric::Euclidean,
             minkowski_p: None,
             num_active: 0,
             last_active_observer: None,
             distance_lists: HashMap::new(),
             last_cluster_time: 0.0,
-            use_brute_force: false,
         }
     }
 
-    /// Setze use_brute_force Flag
-    pub fn set_use_brute_force(&mut self, use_brute_force: bool) {
-        self.use_brute_force = use_brute_force;
-        // Deaktiviere Tree wenn Brute-Force aktiviert wird
-        if use_brute_force {
-            self.tree = None;
-        } else if self.tree.is_none() {
-            // Reaktiviere Tree wenn Brute-Force deaktiviert wird
-            self.tree = Some(ObserverSetTree::new());
-        }
-    }
-
-    /// Set tree parameters and invalidate existing tree
+    /// Set distance parameters
     pub fn set_tree_params(&mut self, distance_metric: DistanceMetric, minkowski_p: Option<f64>) {
         self.distance_metric = distance_metric;
         self.minkowski_p = minkowski_p;
-        // Invalidate tree when parameters change
-        if let Some(ref tree) = self.tree {
-            tree.invalidate();
-        }
     }
 
     /// Get distance metric
@@ -99,18 +74,11 @@ impl ObserverSet {
     }
 
     /// Set num_active
-    /// If num_active is set, the spatial tree will be built with only the active observers
     pub fn set_num_active(&mut self, num_active: usize) {
         if num_active == self.num_active {
             return;
         }
         self.num_active = num_active;
-        // Invalidate active tree when num_active changes
-        if let Some(ref tree) = self.tree {
-            if let Ok(mut tree_opt) = tree.spatial_tree_active.try_borrow_mut() {
-                *tree_opt = None;
-            }
-        }
         // Update last_active_observer cache
         self.update_last_active_observer();
     }
@@ -269,11 +237,6 @@ impl ObserverSet {
         self.indices_by_obs.insert(obs_key, index);
         self.indices_by_score.insert(score_key, index);
 
-        // Incrementally add to tree if it exists (nur für euklidische Distanz)
-        if let Some(ref tree) = self.tree {
-            tree.insert_into_tree(index, &data, self.distance_metric);
-        }
-
         // Update last_active_observer cache, da sich die Observer-Liste geändert hat
         self.update_last_active_observer();
 
@@ -424,13 +387,6 @@ impl ObserverSet {
         self.indices_by_obs.remove(&obs_key);
         self.indices_by_score.remove(&score_key);
 
-        // Remove Observer from Tree
-        if let Some(ref tree) = self.tree {
-            if let Some(observer_arc) = self.observers_by_index.get(&index) {
-                tree.remove_from_tree(index, &observer_arc.data, self.distance_metric);
-            }
-        }
-
         // Update last_active_observer cache, da sich die Observer-Liste geändert hat
         self.update_last_active_observer();
 
@@ -548,40 +504,13 @@ impl ObserverSet {
     }
 
     /// Perform k-nearest neighbor search
-    /// Generische Methode: verwendet automatisch Tree (wenn verfügbar und aktiviert) oder Brute-Force
+    /// Always uses Brute-Force (Tree support disabled)
     pub fn search_k_nearest_distances(
         &self,
         query_point: &[f64],
         k: usize,
         active: bool,
     ) -> Vec<f64> {
-        // Wenn use_brute_force gesetzt ist, verwende immer Brute-Force
-        if self.use_brute_force {
-            return self.brute_force_k_nearest(query_point, k, active);
-        }
-
-        // Versuche Tree-basierte Suche (nur für euklidische Distanz)
-        if let Some(ref tree) = self.tree {
-            let observers: Vec<Arc<Observer>> = if active {
-                self.iter_observers(true)
-                    .map(|obs| self.observers_by_index.get(&obs.index).unwrap().clone())
-                    .collect()
-            } else {
-                self.observers_by_index.values().cloned().collect()
-            };
-
-            if let Some(distances) = tree.search_k_nearest_distances_tree(
-                query_point,
-                k,
-                active,
-                self.distance_metric,
-                &observers,
-            ) {
-                return distances;
-            }
-        }
-
-        // Fallback: Brute-Force
         self.brute_force_k_nearest(query_point, k, active)
     }
 
@@ -612,40 +541,13 @@ impl ObserverSet {
 
     /// Find k nearest observer indices (not just distances)
     /// Returns indices of the k nearest observers to the query point
-    /// Generische Methode: verwendet automatisch Tree (wenn verfügbar und aktiviert) oder Brute-Force
+    /// Always uses Brute-Force (Tree support disabled)
     pub fn search_k_nearest_indices(
         &self,
         query_point: &[f64],
         k: usize,
         active: bool,
     ) -> Vec<usize> {
-        // Wenn use_brute_force gesetzt ist, verwende immer Brute-Force
-        if self.use_brute_force {
-            return self.brute_force_k_nearest_indices(query_point, k, active);
-        }
-
-        // Versuche Tree-basierte Suche (nur für euklidische Distanz)
-        if let Some(ref tree) = self.tree {
-            let observers: Vec<Arc<Observer>> = if active {
-                self.iter_observers(true)
-                    .map(|obs| self.observers_by_index.get(&obs.index).unwrap().clone())
-                    .collect()
-            } else {
-                self.observers_by_index.values().cloned().collect()
-            };
-
-            if let Some(indices) = tree.search_k_nearest_indices_tree(
-                query_point,
-                k,
-                active,
-                self.distance_metric,
-                &observers,
-            ) {
-                return indices;
-            }
-        }
-
-        // Fallback: Brute-Force
         self.brute_force_k_nearest_indices(query_point, k, active)
     }
 
@@ -685,9 +587,6 @@ impl ObserverSet {
         self.observers_by_index.clear();
         self.indices_by_obs.clear();
         self.indices_by_score.clear();
-        if let Some(ref tree) = self.tree {
-            tree.invalidate();
-        }
     }
 }
 

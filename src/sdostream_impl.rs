@@ -23,36 +23,40 @@ pub struct SDOstream {
     data_points_processed: usize, // Zähler für Sampling
     k: usize,                     // Anzahl der Observer (Modellgröße)
     t_fading: f64,                // T-Parameter für fading: f = exp(-T_fading^-1)
-    rho: f64,                     // Rho-Parameter (für num_active Berechnung)
+    t_sampling: f64, // T-Parameter für Sampling-Rate (durchschnittliches Intervall zwischen Ersetzungen)
+    rho: f64,        // Rho-Parameter (für num_active Berechnung)
     use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
     last_replacement_time: f64, // Zeit der letzten Prüfung/Ersetzung (für Lazy Replacement)
     pending_replacements: usize, // Anzahl der ausstehenden Ersetzungen (wenn num_replacements > 1)
 }
 
 #[pymethods]
+#[allow(clippy::too_many_arguments)]
 impl SDOstream {
     #[new]
-    #[pyo3(signature = (k, x, t_fading, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None, use_brute_force = false))]
+    #[pyo3(signature = (k, x, t_fading, t_sampling = None, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None))]
     pub fn new(
         k: usize,
         x: usize,
         t_fading: f64,
+        t_sampling: Option<f64>,
         distance: String,
         minkowski_p: Option<f64>,
         rho: f64,
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
-        use_brute_force: bool,
     ) -> PyResult<Self> {
-        // Sampling interval is derived as t_fading/k to ensure each observer
-        // is replaced on average once every t_fading time units
+        // t_sampling default ist t_fading wenn nicht angegeben
+        let t_sampling_value = t_sampling.unwrap_or(t_fading);
+
         let mut instance = Self {
-            sdo: SDO::new(k, x, rho, distance, minkowski_p, use_brute_force),
+            sdo: SDO::new(k, x, rho, distance, minkowski_p),
             fading: Self::get_fading_static(t_fading),
             data_points_processed: 0,
             k,
             t_fading,
+            t_sampling: t_sampling_value,
             rho,
             use_explicit_time: false,   // Default: auto-increment
             last_replacement_time: 0.0, // Startzeit für Lazy Replacement
@@ -284,6 +288,12 @@ impl SDOstream {
     pub fn t_fading(&self) -> f64 {
         self.t_fading
     }
+
+    /// Gibt t_sampling zurück
+    #[getter]
+    pub fn t_sampling(&self) -> f64 {
+        self.t_sampling
+    }
 }
 
 impl SDOstream {
@@ -324,11 +334,9 @@ impl SDOstream {
             return Ok(()); // Keine Zeit vergangen oder Zeit geht zurück
         }
 
-        // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / (t_fading/k)
-        // Each observer is replaced on average once every t_fading time
-        // With k observers, total replacement rate is k/t_fading observers per time unit
-        // So effective sampling interval is t_fading/k
-        let effective_sampling_interval = self.t_fading / (self.k as f64);
+        // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / t_sampling
+        // t_sampling ist das durchschnittliche Intervall zwischen Ersetzungen
+        let effective_sampling_interval = self.t_sampling / (self.k as f64);
         let lambda_events = elapsed / effective_sampling_interval;
 
         // Simuliere Poisson-Anzahl von Ersetzungen
@@ -419,16 +427,16 @@ impl SDOstream {
 impl Default for SDOstream {
     fn default() -> Self {
         Self::new(
-            10,
+            200,
             5,
             100.0,
+            None, // t_sampling = t_fading
             "euclidean".to_string(),
             None,
             0.1,
             None,
             None,
             None,
-            false,
         )
         .unwrap()
     }

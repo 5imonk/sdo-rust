@@ -18,6 +18,7 @@ except ImportError:
     sys.exit(1)
 
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 
 def test_basic_usage():
     """Grundlegende Verwendung des SDO-Algorithmus"""
@@ -46,6 +47,10 @@ def test_basic_usage():
         [5.5, 6.5],
         [10.0, 11.0],  # Outlier
     ], dtype=np.float64)
+    
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
     
     print(f"Trainingsdaten: {data.shape[0]} Punkte, {data.shape[1]} Dimensionen")
     print("Lerne SDO-Modell...")
@@ -111,6 +116,10 @@ def test_larger_dataset():
     
     all_data = np.vstack([normal_data, outlier_data]).astype(np.float64)
     
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    all_data = scaler.fit_transform(all_data)
+    
     print(f"Datensatz: {all_data.shape[0]} Punkte, {all_data.shape[1]} Dimensionen")
     print(f"  - Normale Punkte: {len(normal_data)}")
     print(f"  - Outlier: {len(outlier_data)}")
@@ -169,8 +178,10 @@ def test_different_parameters():
         {"k": 20, "x": 5, "rho": 0.3, "name": "Moderat"},
         {"k": 30, "x": 7, "rho": 0.4, "name": "Aggressiv"},
     ]
-    
-    test_point = np.array([[15.0, 15.0]], dtype=np.float64)  # Bekannter Outlier
+
+    # Normalisiere Daten
+    scaler = MinMaxScaler()
+    test_point = scaler.transform(np.array([[15.0, 15.0]], dtype=np.float64))  # Bekannter Outlier
     
     print(f"Testpunkt (Outlier): [{test_point[0,0]}, {test_point[0,1]}]")
     print("\nVergleich verschiedener Parameter:")
@@ -213,18 +224,22 @@ def test_edge_cases():
     # Test 3: Sehr wenige Daten
     print("\nTest 4.3: Sehr wenige Daten")
     few_data = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float64)
+    scaler = MinMaxScaler()
+    few_data = scaler.fit_transform(few_data)
     sdo = SDO(k=2, x=1, rho=0.1)
     sdo.learn(few_data)
-    test_point = np.array([[10.0, 10.0]], dtype=np.float64)
+    test_point = scaler.transform(np.array([[10.0, 10.0]], dtype=np.float64))
     score = sdo.predict(test_point)
     print(f"  ✓ Wenige Daten: Score = {score:.4f}")
     
     # Test 4: 1D-Daten (wird zu 2D konvertiert)
     print("\nTest 4.4: 1D-Daten")
     data_1d = np.array([[1.0], [2.0], [3.0], [10.0]], dtype=np.float64)
+    scaler = MinMaxScaler()
+    data_1d = scaler.fit_transform(data_1d)
     sdo = SDO(k=2, x=2, rho=0.2)
     sdo.learn(data_1d)
-    point_1d = np.array([[5.0]], dtype=np.float64)
+    point_1d = scaler.transform(np.array([[5.0]], dtype=np.float64))
     score = sdo.predict(point_1d)
     print(f"  ✓ 1D-Daten: Score = {score:.4f}")
     
@@ -255,6 +270,10 @@ def test_performance():
         
         # Prediction
         test_points = np.random.randn(100, 2).astype(np.float64)
+    
+        # Normalisiere Daten
+        scaler = MinMaxScaler()
+        test_points = scaler.transform(test_points)
         start = time.time()
         for point in test_points:
             point_2d = point.reshape(1, -1)
