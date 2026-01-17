@@ -15,6 +15,9 @@ pub struct SDOstreamclust {
     k: usize,             // Anzahl der Observer (für chi Berechnung)
     zeta: f64,
     min_cluster_size: usize,
+
+    // Cluster-specific caching for predict() optimization
+    cached_cluster_scores: Option<std::collections::HashMap<i32, f64>>, // Cached cluster scores
 }
 
 #[pymethods]
@@ -59,6 +62,9 @@ impl SDOstreamclust {
             k,
             zeta,
             min_cluster_size,
+
+            // Initialize cluster cache
+            cached_cluster_scores: None,
         };
 
         // Initialisiere mit Parametern (wenn Daten/Dimension/Zeit angegeben)
@@ -72,6 +78,9 @@ impl SDOstreamclust {
             }
 
             instance.sdostream.initialize(dimension, data, time)?;
+
+            // Invalidiere Cluster-Cache nach Initialisierung
+            instance.cached_cluster_scores = None;
         }
 
         Ok(instance)
@@ -134,6 +143,17 @@ impl SDOstreamclust {
                 &cluster_labels,
             );
 
+        // Cache cluster-spezifische predict Informationen
+        if let Some(ref cached_indices) = self.sdostream.get_cached_nearest_active_indices() {
+            let label_scores = self
+                .sdostream
+                .get_sdo()
+                .observers
+                .get_normalized_cluster_scores(cached_indices);
+
+            self.cached_cluster_scores = Some(label_scores);
+        }
+
         Ok(())
     }
 
@@ -150,13 +170,38 @@ impl SDOstreamclust {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        // Finde x-nächste aktive Observer
+        // Prüfe ob wir gecachte Ergebnisse verwenden können
+        if let (Some(ref cached_point), Some(ref cached_scores)) = (
+            self.sdostream.get_cached_point(),
+            &self.cached_cluster_scores,
+        ) {
+            // Verifiziere dass Cache für den gleichen Punkt ist (mit Toleranz für Fließkomma)
+            if self.sdostream.get_cached_nearest_active_indices().is_some()
+                && crate::sdostream_impl::SDOstream::points_match(&point_vec, cached_point)
+                && self.sdostream.is_cache_valid()
+            {
+                // Verwende gecachte Cluster-Scores - dies ist der "kostenlose" predict!
+                let predicted_label = cached_scores
+                    .iter()
+                    .max_by(|(_, &a), (_, &b)| {
+                        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(&label, _)| label)
+                    .unwrap_or(-1); // -1 wenn keine Beobachtungen
+
+                return Ok(predicted_label);
+            }
+        }
+
+        // Fallback: neu berechnen wenn Cache ungültig
+        // Finde x-nächste aktive Observer (using optimized unified search mit aktiven info)
         let x = self.sdostream.x();
-        let nearest_indices = self
+        let (active_neighbors, _, _) = self
             .sdostream
             .get_sdo()
             .observers
-            .search_k_nearest_indices(&point_vec, x, true);
+            .search_neighbors_unified(&point_vec, x, true);
+        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Berechne normalisierte Cluster-Scores der x-nächsten Observer
         let label_scores = self

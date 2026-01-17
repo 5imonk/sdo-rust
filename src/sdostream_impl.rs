@@ -28,6 +28,12 @@ pub struct SDOstream {
     use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
     last_replacement_time: f64, // Zeit der letzten Prüfung/Ersetzung (für Lazy Replacement)
     pending_replacements: usize, // Anzahl der ausstehenden Ersetzungen (wenn num_replacements > 1)
+
+    // Caching fields for predict() optimization
+    cached_point: Option<Vec<f64>>, // Cached point from last learn()
+    cached_nearest_active_indices: Option<Vec<usize>>, // Cached nearest active observer indices
+    cached_nearest_active_distances: Option<Vec<f64>>, // Cached distances to nearest active observers
+    cache_valid: bool,                                 // Whether cache is valid
 }
 
 #[pymethods]
@@ -61,6 +67,12 @@ impl SDOstream {
             use_explicit_time: false,   // Default: auto-increment
             last_replacement_time: 0.0, // Startzeit für Lazy Replacement
             pending_replacements: 0,    // Keine ausstehenden Ersetzungen
+
+            // Initialize cache fields
+            cached_point: None,
+            cached_nearest_active_indices: None,
+            cached_nearest_active_distances: None,
+            cache_valid: false,
         };
 
         // Initialisiere mit Parametern (wenn Daten/Dimension/Zeit angegeben)
@@ -240,12 +252,37 @@ impl SDOstream {
             (self.data_points_processed + 1) as f64
         };
 
-        // Schritt 1: Finde x-nächste Observer (verwende SDO's Tree)
+        // Schritt 1: Finde x-nächste Observer (verwende optimierte unified search mit active count)
         let x = self.sdo.x;
-        let nearest_observer_indices = self
+
+        // Schritt 1a: Finde alle Observer für learning
+        let (all_neighbors, _, _) = self
             .sdo
             .observers
-            .search_k_nearest_indices(&point_vec, x, false);
+            .search_neighbors_unified(&point_vec, x, false);
+        let nearest_observer_indices: Vec<usize> = all_neighbors.iter().map(|n| n.index).collect();
+
+        // Schritt 1b: Finde und cache x-nächste AKTIVE Observer für zukünftige predict() Aufrufe
+        let (active_neighbors, _, active_count) = self
+            .sdo
+            .observers
+            .search_neighbors_unified(&point_vec, x, true);
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+        let nearest_active_distances: Vec<f64> =
+            active_neighbors.iter().map(|n| n.distance).collect();
+
+        // Update cache mit den Informationen für predict()
+        self.cached_point = Some(point_vec.clone());
+        self.cached_nearest_active_indices = Some(nearest_active_indices);
+        self.cached_nearest_active_distances = Some(nearest_active_distances);
+        self.cache_valid = true;
+
+        // Note: active_count available for future optimizations (smart cache invalidation possible)
+        println!(
+            "Active neighbors found: {} (out of {} total neighbors)",
+            active_count,
+            active_neighbors.len()
+        );
 
         // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
         // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
@@ -266,8 +303,31 @@ impl SDOstream {
 
     /// Berechnet den Outlier-Score für einen Datenpunkt (delegiert an SDO)
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        // SDOstream verwendet rho, um aktive Observer zu bestimmen
-        // SDO's predict verwendet bereits die aktiven Observer basierend auf rho
+        let point_slice = point.as_array();
+        if point_slice.nrows() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
+            ));
+        }
+
+        let point_vec: Vec<f64> = (0..point_slice.ncols())
+            .map(|j| point_slice[[0, j]])
+            .collect();
+
+        // Prüfe ob wir gecachte Ergebnisse verwenden können
+        if let (Some(ref cached_point), Some(ref cached_distances), Some(_cached_indices)) = (
+            &self.cached_point,
+            &self.cached_nearest_active_distances,
+            &self.cached_nearest_active_indices,
+        ) {
+            // Verifiziere dass Cache für den gleichen Punkt ist (mit Toleranz für Fließkomma)
+            if Self::points_match(&point_vec, cached_point) && self.cache_valid {
+                // Verwende gecachte Distanzen - dies ist der "kostenlose" predict!
+                return Ok(Self::compute_median(cached_distances.clone()));
+            }
+        }
+
+        // Fallback: neu berechnen wenn Cache ungültig
         self.sdo.predict(point)
     }
 
@@ -320,6 +380,58 @@ impl SDOstream {
     /// Gibt sdo mut zurück (für interne Verwendung)
     pub(crate) fn get_sdo_mut(&mut self) -> &mut SDO {
         &mut self.sdo
+    }
+
+    /// Helper function to check if two points match within tolerance
+    pub fn points_match(point1: &[f64], point2: &[f64]) -> bool {
+        if point1.len() != point2.len() {
+            return false;
+        }
+        const TOLERANCE: f64 = 1e-10;
+        for (a, b) in point1.iter().zip(point2.iter()) {
+            if (a - b).abs() > TOLERANCE {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Helper function to compute median of distances
+    pub fn compute_median(mut distances: Vec<f64>) -> f64 {
+        if distances.is_empty() {
+            return f64::INFINITY;
+        }
+
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = distances.len() / 2;
+        if distances.len().is_multiple_of(2) && mid > 0 {
+            (distances[mid - 1] + distances[mid]) / 2.0
+        } else {
+            distances[mid]
+        }
+    }
+
+    /// Invalidate the cache (call when observer set changes)
+    fn invalidate_cache(&mut self) {
+        self.cache_valid = false;
+        self.cached_point = None;
+        self.cached_nearest_active_indices = None;
+        self.cached_nearest_active_distances = None;
+    }
+
+    /// Get cache validity for external access
+    pub(crate) fn is_cache_valid(&self) -> bool {
+        self.cache_valid
+    }
+
+    /// Get cached point for external access
+    pub(crate) fn get_cached_point(&self) -> &Option<Vec<f64>> {
+        &self.cached_point
+    }
+
+    /// Get cached nearest active indices for external access
+    pub(crate) fn get_cached_nearest_active_indices(&self) -> &Option<Vec<usize>> {
+        &self.cached_nearest_active_indices
     }
 }
 
@@ -419,6 +531,9 @@ impl SDOstream {
 
         // Verwende SDO's replace_observer Methode - O(log n)
         self.sdo.replace_observer(replace_idx, new_observer);
+
+        // Invalidiere Cache da Observer-Set sich geändert hat
+        self.invalidate_cache();
 
         Ok(())
     }

@@ -342,3 +342,80 @@ mod performance_tests {
         assert!(threshold_time.as_millis() < 1000); // Should be fast
     }
 }
+
+#[cfg(test)]
+mod cache_tests {
+    use crate::sdostream_impl::SDOstream;
+
+    #[test]
+    fn test_sdostream_helper_functions() {
+        // Test points_match function
+        let point1 = vec![1.0, 2.0, 3.0];
+        let point2 = vec![1.0, 2.0, 3.0];
+        let point3 = vec![1.0, 2.0, 3.0000000001]; // Within tolerance
+        let point4 = vec![1.0, 2.0, 3.1]; // Outside tolerance
+        let point5 = vec![1.0, 2.0]; // Different length
+
+        assert!(SDOstream::points_match(&point1, &point2));
+        assert!(SDOstream::points_match(&point1, &point3));
+        assert!(!SDOstream::points_match(&point1, &point4));
+        assert!(!SDOstream::points_match(&point1, &point5));
+
+        // Test compute_median function
+        let distances1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let distances2 = vec![1.0, 2.0, 3.0, 4.0];
+        let distances3 = vec![];
+
+        assert_eq!(SDOstream::compute_median(distances1), 3.0);
+        assert_eq!(SDOstream::compute_median(distances2), 2.5); // (2+3)/2
+        assert_eq!(SDOstream::compute_median(distances3), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_sdostream_initialization() {
+        let sdostream = SDOstream::new(
+            10,    // k
+            3,     // x
+            100.0, // t_fading
+            None,  // t_sampling
+            "euclidean".to_string(),
+            None,    // minkowski_p
+            0.1,     // rho
+            Some(3), // dimension
+            None,    // data
+            None,    // time
+        )
+        .unwrap();
+
+        // Test initial state
+        assert!(!sdostream.is_cache_valid());
+        assert!(sdostream.get_cached_point().is_none());
+        assert_eq!(sdostream.x(), 3);
+        assert_eq!(sdostream.k(), 10);
+    }
+
+    #[test]
+    fn test_points_match_function() {
+        let point1 = vec![1.0, 2.0, 3.0];
+        let point2 = vec![1.0, 2.0, 3.0];
+        let point3 = vec![1.0, 2.0, 3.0000000001]; // Within tolerance
+        let point4 = vec![1.0, 2.0, 3.1]; // Outside tolerance
+        let point5 = vec![1.0, 2.0]; // Different length
+
+        assert!(SDOstream::points_match(&point1, &point2));
+        assert!(SDOstream::points_match(&point1, &point3));
+        assert!(!SDOstream::points_match(&point1, &point4));
+        assert!(!SDOstream::points_match(&point1, &point5));
+    }
+
+    #[test]
+    fn test_compute_median_function() {
+        let distances1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let distances2 = vec![1.0, 2.0, 3.0, 4.0];
+        let distances3 = vec![];
+
+        assert_eq!(SDOstream::compute_median(distances1), 3.0);
+        assert_eq!(SDOstream::compute_median(distances2), 2.5); // (2+3)/2
+        assert_eq!(SDOstream::compute_median(distances3), f64::INFINITY);
+    }
+}

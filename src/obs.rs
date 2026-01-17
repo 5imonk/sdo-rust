@@ -124,6 +124,15 @@ impl Observer {
     }
 }
 
+/// Neighbor information with index, distance, and active status
+/// Used for unified k-nearest neighbor search operations
+#[derive(Debug, Clone)]
+pub struct NeighborInfo {
+    pub index: usize,
+    pub distance: f64,
+    pub is_active: bool,
+}
+
 // Helper struct for comparing floats in collections
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OrderedFloat(pub(crate) f64);

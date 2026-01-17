@@ -2,7 +2,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::obs::{NormalizedScoreKey, ObservationKey, Observer, OrderedDistanceList, OrderedFloat};
+use crate::obs::{
+    NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedDistanceList, OrderedFloat,
+};
 use crate::utils::{compute_distance, DistanceMetric};
 
 /// Efficient ObserverSet with dual indexing for O(log n) operations
@@ -533,82 +535,131 @@ impl ObserverSet {
         self.cache_valid = false;
     }
 
-    /// Perform k-nearest neighbor search
-    /// Always uses Brute-Force (Tree support disabled)
+    /// Find k nearest observer distances
+    /// Now uses unified search method for optimization
+    /// Returns distances to k nearest observers to the query point
     pub fn search_k_nearest_distances(
         &self,
         query_point: &[f64],
         k: usize,
         active: bool,
     ) -> Vec<f64> {
-        self.brute_force_k_nearest(query_point, k, active)
-    }
-
-    /// Brute-Force k-nearest neighbor search für nicht-euklidische Metriken
-    fn brute_force_k_nearest(&self, query_point: &[f64], k: usize, active: bool) -> Vec<f64> {
-        let mut distances: Vec<(usize, f64)> = self
-            .iter_observers(active)
-            .map(|obs| {
-                (
-                    obs.index,
-                    compute_distance(
-                        &obs.data,
-                        query_point,
-                        self.distance_metric,
-                        self.minkowski_p,
-                    ),
-                )
-            })
-            .collect();
-
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        distances
-            .into_iter()
-            .take(k)
-            .map(|(_, dist)| dist)
-            .collect()
+        let (neighbors, _, _) = self.search_neighbors_unified(query_point, k, active);
+        neighbors.iter().map(|n| n.distance).collect()
     }
 
     /// Find k nearest observer indices (not just distances)
+    /// Now uses unified search method for optimization
     /// Returns indices of k nearest observers to the query point
-    /// Always uses Brute-Force (Tree support disabled)
     pub fn search_k_nearest_indices(
         &self,
         query_point: &[f64],
         k: usize,
         active: bool,
     ) -> Vec<usize> {
-        self.brute_force_k_nearest_indices(query_point, k, active)
+        let (neighbors, _, _) = self.search_neighbors_unified(query_point, k, active);
+        neighbors.iter().map(|n| n.index).collect()
     }
 
-    /// Brute-Force k-nearest neighbor search für Indizes
-    fn brute_force_k_nearest_indices(
+    /// Single-pass unified search returning neighbor info and active count
+    /// Optimizes by iterating through observers once while tracking both all and active neighbors
+    /// Returns (all_neighbors, active_neighbors, active_neighbor_count) where:
+    /// - all_neighbors: All k-nearest neighbors regardless of active status
+    /// - active_neighbors: Only active neighbors among the k-nearest (filtered)
+    /// - active_neighbor_count: Number of active neighbors found
+    pub fn search_neighbors_unified(
         &self,
         query_point: &[f64],
         k: usize,
-        active: bool,
-    ) -> Vec<usize> {
-        let mut observer_distances: Vec<(usize, f64)> = self
-            .iter_observers(active)
-            .map(|obs| {
-                (
-                    obs.index,
-                    compute_distance(
-                        &obs.data,
-                        query_point,
-                        self.distance_metric,
-                        self.minkowski_p,
-                    ),
-                )
-            })
-            .collect();
+        active_only: bool,
+    ) -> (Vec<NeighborInfo>, Vec<NeighborInfo>, usize) {
+        let mut nearest = Vec::with_capacity(k);
+        let mut nearest_active = Vec::with_capacity(k);
+        let total_observers = self.observers_by_index.len();
 
-        observer_distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        observer_distances
-            .into_iter()
-            .take(k)
-            .map(|(idx, _)| idx)
-            .collect()
+        // Handle edge case: k > available observers
+        let effective_k = if k > total_observers {
+            println!(
+                "Warning: k ({}) is greater than available observers ({}), using all observers",
+                k, total_observers
+            );
+            total_observers
+        } else {
+            k
+        };
+
+        // Single pass through sorted observers (indices_by_obs is already sorted by observations)
+        // Key: First num_active observers are TRULY active, others are inactive by definition
+        for (position, (_obs_key, &observer_index)) in self.indices_by_obs.iter().enumerate() {
+            let observer = match self.observers_by_index.get(&observer_index) {
+                Some(obs) => obs,
+                None => continue,
+            };
+
+            // Determine active status from position in sorted order
+            // First num_active observers are active by definition
+            let is_active = position < self.num_active;
+
+            // Skip if only active observers requested and this one is inactive
+            if active_only && !is_active {
+                continue;
+            }
+
+            // Compute distance once
+            let distance = compute_distance(
+                &observer.data,
+                query_point,
+                self.distance_metric,
+                self.minkowski_p,
+            );
+
+            let neighbor_info = NeighborInfo {
+                index: observer_index,
+                distance,
+                is_active,
+            };
+
+            // Store in all neighbors
+            nearest.push(neighbor_info.clone());
+
+            // Store in active neighbors if applicable
+            if is_active {
+                nearest_active.push(neighbor_info);
+            }
+
+            // Smart early termination conditions
+            if active_only {
+                // For active-only: stop when we have k active neighbors
+                if nearest_active.len() >= effective_k {
+                    break;
+                }
+            } else {
+                // For all observers: stop when we have k total neighbors
+                if nearest.len() >= effective_k {
+                    break;
+                }
+            }
+        }
+
+        // Sort by distance and truncate to k nearest
+        nearest.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
+        nearest.truncate(effective_k);
+
+        // Sort active neighbors by distance and truncate to k nearest
+        nearest_active.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
+        nearest_active.truncate(effective_k);
+
+        let active_neighbor_count = nearest_active.len();
+
+        (nearest, nearest_active, active_neighbor_count)
     }
 
     /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste

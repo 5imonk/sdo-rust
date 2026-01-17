@@ -117,10 +117,11 @@ impl SDO {
 
         // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
         for data_point in &data_vec {
-            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt
-            let nearest_indices = self
+            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
+            let (neighbors, _, _) = self
                 .observers
-                .search_k_nearest_indices(data_point, self.x, false);
+                .search_neighbors_unified(data_point, self.x, false);
+            let nearest_indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
 
             // Erhöhe observations für jeden dieser Observer um 1
             for idx in nearest_indices {
@@ -155,10 +156,11 @@ impl SDO {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        // Suche nur unter den aktiven Observers
-        let distances = self
+        // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
+        let (active_neighbors, _, _) = self
             .observers
-            .search_k_nearest_distances(&point_vec, self.x, true);
+            .search_neighbors_unified(&point_vec, self.x, true);
+        let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
 
         if distances.is_empty() {
             return Ok(f64::INFINITY);

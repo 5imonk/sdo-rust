@@ -84,11 +84,12 @@ impl SDOclust {
             .map(|j| point_slice[[0, j]])
             .collect();
 
-        // Finde die x nächsten Nachbarn unter den aktiven Observers
-        let nearest_indices = self
+        // Finde die x nächsten Nachbarn unter den aktiven Observers (using optimized unified search)
+        let (active_neighbors, _, _) = self
             .sdo
             .observers
-            .search_k_nearest_indices(&point_vec, self.sdo.x, true);
+            .search_neighbors_unified(&point_vec, self.sdo.x, true);
+        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Zähle die Häufigkeit der Labels
         let mut label_counts: HashMap<i32, usize> = HashMap::new();
@@ -102,7 +103,7 @@ impl SDOclust {
             }
         }
 
-        // Gib das häufigste Label zurück
+        // Gib das häufigste Label zurück (optimiert mit vorgefilterten aktiven Observers)
         if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
             Ok(most_common_label)
         } else {
@@ -113,12 +114,13 @@ impl SDOclust {
     /// Gibt die Anzahl der Cluster zurück
     pub fn n_clusters(&self) -> usize {
         // Stelle sicher, dass Clustering durchgeführt wurde
+        // Gehe durch alle aktiven Observer und sammle eindeutige Labels
         let unique_labels: HashSet<i32> = self
             .sdo
             .observers
             .iter_observers(true)
             .filter_map(|obs| obs.label)
-            .filter(|&l| l >= 0)
+            .filter(|&label| label >= 0) // Filter out -1 labels (outliers)
             .collect();
         unique_labels.len()
     }
@@ -129,9 +131,10 @@ impl SDOclust {
         self.sdo.x
     }
 
-    /// Gibt die Labels der Observer zurück
+    /// Gibt die Labels der Observer zurück (optimiert mit aktiven Observer-Info)
     pub fn get_observer_labels(&self) -> Vec<i32> {
         // Stelle sicher, dass Clustering durchgeführt wurde
+        // Gehe einfach durch alle aktiven Observer
         self.sdo
             .observers
             .iter_observers(true)
