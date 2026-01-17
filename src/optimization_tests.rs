@@ -39,7 +39,7 @@ mod distance_optimization_tests {
         list.insert(5, 5.0);
 
         // Test k-nearest
-        let k_nearest = list.get_k_nearest_distances(3);
+        let k_nearest: Vec<f64> = list.distances.iter().take(3).map(|(_, d)| *d).collect();
         assert_eq!(k_nearest.len(), 3);
         assert_eq!(k_nearest[0], 1.0);
         assert_eq!(k_nearest[1], 2.0);

@@ -174,6 +174,18 @@ impl SDO {
         Ok(median)
     }
 
+    /// Calculate Mahalanobis distance uniformity score for subset of observers
+    /// Returns convexity score where lower values indicate more convex (uniform) distribution
+    pub fn get_observer_subset_mahalanobis_score(
+        &self,
+        observer_indices: Option<Vec<usize>>,
+    ) -> f64 {
+        match observer_indices {
+            Some(indices) => self.observers.mahalanobis_uniformity_score(Some(&indices)),
+            None => self.observers.mahalanobis_uniformity_score(None),
+        }
+    }
+
     /// Konvertiert active_observers zu NumPy-Array für Python
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
         let active_observers = self.observers.get_observers(true);

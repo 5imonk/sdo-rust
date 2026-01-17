@@ -385,7 +385,7 @@ impl ObserverSet {
 
     /// Remove an observer by index - O(log n)
     pub fn remove(&mut self, index: usize) -> Option<Observer> {
-        // Get the observer Arc to remove (need values for keys)
+        // Get observer Arc to remove (need values for keys)
         let observer_arc = self.observers_by_index.get(&index)?;
 
         // Create keys to remove from secondary indices
@@ -399,7 +399,7 @@ impl ObserverSet {
             f64::INFINITY
         };
         let score_key = NormalizedScoreKey {
-            score: OrderedFloat(normalized_score),
+            score: crate::obs::OrderedFloat(normalized_score),
             index,
         };
 
@@ -570,7 +570,7 @@ impl ObserverSet {
     }
 
     /// Find k nearest observer indices (not just distances)
-    /// Returns indices of the k nearest observers to the query point
+    /// Returns indices of k nearest observers to the query point
     /// Always uses Brute-Force (Tree support disabled)
     pub fn search_k_nearest_indices(
         &self,
@@ -682,6 +682,99 @@ impl ObserverSet {
         }
     }
 
+    /// Calculate Mahalanobis distance uniformity score for a subset of observers
+    /// Returns a score where lower values indicate more uniform (convex) distribution
+    /// Higher values indicate stronger non-uniformity
+    pub fn mahalanobis_uniformity_score(&self, observer_indices: Option<&[usize]>) -> f64 {
+        // Collect observer data based on indices
+        let observer_data: Vec<Vec<f64>> = match observer_indices {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&idx| self.get(idx).map(|obs| obs.data.clone()))
+                .collect(),
+            None => self
+                .iter_observers(true)
+                .map(|obs| obs.data.clone())
+                .collect(),
+        };
+
+        if observer_data.len() < 2 {
+            return 0.0; // No meaningful score for < 2 points
+        }
+
+        // Calculate mean vector
+        let num_observers = observer_data.len();
+        let num_features = observer_data[0].len();
+
+        let mut mean = vec![0.0; num_features];
+        for obs_data in &observer_data {
+            for (j, &value) in obs_data.iter().enumerate() {
+                mean[j] += value;
+            }
+        }
+        for value in &mut mean {
+            *value /= num_observers as f64;
+        }
+
+        // Calculate covariance matrix manually
+        let mut cov_matrix = vec![vec![0.0; num_features]; num_features];
+        for obs_data in &observer_data {
+            for i in 0..num_features {
+                for j in 0..num_features {
+                    let diff_i = obs_data[i] - mean[i];
+                    let diff_j = obs_data[j] - mean[j];
+                    cov_matrix[i][j] += diff_i * diff_j;
+                }
+            }
+        }
+        for i in 0..num_features {
+            for j in 0..num_features {
+                cov_matrix[i][j] /= (num_observers - 1) as f64;
+            }
+        }
+
+        // Try to compute inverse of covariance matrix using our helper function
+        let inv_cov = match matrix_inverse_2x2_or_3x3(&cov_matrix) {
+            Some(inv) => inv,
+            None => {
+                // For singular matrices, use diagonal approximation
+                let mut inv_cov = vec![vec![0.0; num_features]; num_features];
+                for i in 0..num_features {
+                    if cov_matrix[i][i] > 1e-10 {
+                        inv_cov[i][i] = 1.0 / cov_matrix[i][i];
+                    } else {
+                        inv_cov[i][i] = 1.0; // Regularization
+                    }
+                }
+                inv_cov
+            }
+        };
+
+        // Calculate Mahalanobis distances for each observer
+        let mut distances = Vec::new();
+        for obs_data in &observer_data {
+            let diff: Vec<f64> = obs_data.iter().zip(&mean).map(|(x, m)| x - m).collect();
+
+            // Calculate diff^T * inv_cov * diff
+            let mut temp = vec![0.0; num_features];
+            for i in 0..num_features {
+                for j in 0..num_features {
+                    temp[i] += inv_cov[i][j] * diff[j];
+                }
+            }
+
+            let mut mahal_dist_sq = 0.0;
+            for i in 0..num_features {
+                mahal_dist_sq += diff[i] * temp[i];
+            }
+
+            distances.push(mahal_dist_sq.sqrt());
+        }
+
+        // Return mean distance as uniformity score
+        distances.iter().sum::<f64>() / distances.len() as f64
+    }
+
     /// Clear all observers - O(n)
     #[allow(dead_code)] // Für zukünftige Verwendung
     pub fn clear(&mut self) {
@@ -695,4 +788,62 @@ impl Default for ObserverSet {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Simple matrix inverse for 2x2 or 3x3 matrices
+/// Returns None for non-invertible matrices
+fn matrix_inverse_2x2_or_3x3(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = matrix.len();
+
+    if n == 2 {
+        let a = matrix[0][0];
+        let b = matrix[0][1];
+        let c = matrix[1][0];
+        let d = matrix[1][1];
+        let det = a * d - b * c;
+
+        if det.abs() < 1e-10 {
+            return None;
+        }
+
+        let inv_det = 1.0 / det;
+        Some(vec![
+            vec![d * inv_det, -b * inv_det],
+            vec![-c * inv_det, a * inv_det],
+        ])
+    } else if n == 3 {
+        // For 3x3, use simple cofactor method
+        let det = matrix_determinant_3x3(matrix);
+
+        if det.abs() < 1e-10 {
+            return None;
+        }
+
+        let inv_det = 1.0 / det;
+        let mut inv = vec![vec![0.0; 3]; 3];
+
+        // Compute cofactors
+        inv[0][0] = (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1]) * inv_det;
+        inv[0][1] = (matrix[0][2] * matrix[2][1] - matrix[0][1] * matrix[2][2]) * inv_det;
+        inv[0][2] = (matrix[0][1] * matrix[1][2] - matrix[0][2] * matrix[1][1]) * inv_det;
+
+        inv[1][0] = (matrix[1][2] * matrix[2][0] - matrix[1][0] * matrix[2][2]) * inv_det;
+        inv[1][1] = (matrix[0][0] * matrix[2][2] - matrix[0][2] * matrix[2][0]) * inv_det;
+        inv[1][2] = (matrix[0][2] * matrix[1][0] - matrix[0][0] * matrix[1][2]) * inv_det;
+
+        inv[2][0] = (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]) * inv_det;
+        inv[2][1] = (matrix[0][1] * matrix[2][0] - matrix[0][0] * matrix[2][1]) * inv_det;
+        inv[2][2] = (matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]) * inv_det;
+
+        Some(inv)
+    } else {
+        None
+    }
+}
+
+/// Calculate determinant of 3x3 matrix
+fn matrix_determinant_3x3(matrix: &[Vec<f64>]) -> f64 {
+    matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+        - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
 }

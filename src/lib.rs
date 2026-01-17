@@ -12,6 +12,9 @@ pub mod utils;
 #[cfg(test)]
 mod optimization_tests;
 
+#[cfg(test)]
+mod mahalanobis_tests;
+
 use pyo3::prelude::*;
 
 use sdo_impl::SDO;

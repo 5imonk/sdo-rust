@@ -143,6 +143,52 @@ impl SDOclust {
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
         self.sdo.get_active_observers(py)
     }
+
+    /// Calculate Mahalanobis distance uniformity score for a specific cluster
+    /// Returns convexity score where lower values indicate more convex (uniform) distribution
+    pub fn get_cluster_convexity_score(&self, cluster_label: i32) -> f64 {
+        // Find all observers belonging to the specified cluster
+        let cluster_observers: Vec<usize> = self
+            .sdo
+            .observers
+            .iter_observers(true)
+            .enumerate()
+            .filter_map(|(_i, obs)| {
+                if obs.label == Some(cluster_label) {
+                    Some(obs.index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if cluster_observers.is_empty() {
+            return f64::INFINITY; // No observers for this cluster
+        }
+
+        // Calculate Mahalanobis score for cluster observers
+        self.sdo
+            .observers
+            .mahalanobis_uniformity_score(Some(&cluster_observers))
+    }
+
+    /// Calculate convexity scores for all clusters
+    /// Returns HashMap mapping cluster labels to their convexity scores
+    pub fn get_all_cluster_convexity_scores(&self) -> HashMap<i32, f64> {
+        let mut scores = HashMap::new();
+        let cluster_labels: std::collections::HashSet<i32> = self
+            .sdo
+            .observers
+            .iter_observers(true)
+            .filter_map(|obs| obs.label)
+            .collect();
+
+        for &label in &cluster_labels {
+            scores.insert(label, self.get_cluster_convexity_score(label));
+        }
+
+        scores
+    }
 }
 
 impl Default for SDOclust {

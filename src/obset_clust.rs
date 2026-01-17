@@ -245,5 +245,4 @@ impl ObserverSet {
         let local_threshold = self.compute_local_threshold_impl(index, chi);
         zeta * local_threshold + (1.0 - zeta) * global_threshold
     }
-    
 }
