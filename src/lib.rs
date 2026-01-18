@@ -8,10 +8,6 @@ mod sdoclust_impl;
 mod sdostrcl_impl;
 mod sdostream_impl;
 pub mod utils;
-
-#[cfg(test)]
-mod optimization_tests;
-
 #[cfg(test)]
 mod mahalanobis_tests;
 

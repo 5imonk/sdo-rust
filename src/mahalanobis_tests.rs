@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-
-use crate::obs::Observer;
 use crate::obset::ObserverSet;
 
 #[cfg(test)]
@@ -109,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_mahalanobis_uniformity_score() {
-        let (obs_set, indices) = create_test_observers();
+        let (obs_set, _indices) = create_test_observers();
 
         // Test uniform cluster (indices 0-3)
         let uniform_indices = vec![0, 1, 2, 3];

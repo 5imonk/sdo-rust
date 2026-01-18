@@ -1,8 +1,10 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use std::collections::HashSet;
+use pyo3::exceptions::PyValueError;
+use std::collections::{HashSet};
 
 use crate::sdostream_impl::SDOstream;
+use crate::utils::{point_to_vec, time_to_f64};
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -10,14 +12,9 @@ use crate::sdostream_impl::SDOstream;
 #[allow(clippy::upper_case_acronyms)]
 pub struct SDOstreamclust {
     sdostream: SDOstream, // Basis SDOstream-Implementierung
-    chi_min: usize,       // Minimum chi value
-    chi_prop: f64,        // Proportion of k for chi calculation
-    k: usize,             // Anzahl der Observer (für chi Berechnung)
+    chi: usize,
     zeta: f64,
     min_cluster_size: usize,
-
-    // Cluster-specific caching for predict() optimization
-    cached_cluster_scores: Option<std::collections::HashMap<i32, f64>>, // Cached cluster scores
 }
 
 #[pymethods]
@@ -41,10 +38,20 @@ impl SDOstreamclust {
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Self> {
-        // Check if initialization is needed before moving values
-        let needs_init = data.is_some() || dimension.is_some() || time.is_some();
+        // Validate parameters
+        if chi_prop < 0.0 || chi_prop > 1.0 {
+            return Err(PyErr::new::<PyValueError, _>(
+                "chi_prop must be between 0.0 and 1.0",
+            ));
+        }
+        
+        if zeta < 0.0 || zeta > 1.0 {
+            return Err(PyErr::new::<PyValueError, _>(
+                "zeta must be between 0.0 and 1.0",
+            ));
+        }
 
-        let mut instance = Self {
+        Ok(Self {
             sdostream: SDOstream::new(
                 k,
                 x,
@@ -54,36 +61,13 @@ impl SDOstreamclust {
                 minkowski_p,
                 rho,
                 dimension,
-                data.clone(),
-                time.clone(),
+                data,
+                time,
             )?,
-            chi_min,
-            chi_prop,
-            k,
+            chi: ((chi_min as f64).max(chi_prop * k as f64) as usize).max(1),
             zeta,
             min_cluster_size,
-
-            // Initialize cluster cache
-            cached_cluster_scores: None,
-        };
-
-        // Initialisiere mit Parametern (wenn Daten/Dimension/Zeit angegeben)
-        if needs_init {
-            // Setze last_cluster_time basierend auf Initialisierung
-            if let Some(time_array) = &time {
-                let time_slice = time_array.as_array();
-                if time_slice.len() == 1 {
-                    instance.sdostream.get_sdo_mut().observers.last_cluster_time = time_slice[[0]];
-                }
-            }
-
-            instance.sdostream.initialize(dimension, data, time)?;
-
-            // Invalidiere Cluster-Cache nach Initialisierung
-            instance.cached_cluster_scores = None;
-        }
-
-        Ok(instance)
+        })
     }
 
     /// Verarbeitet einen einzelnen Datenpunkt aus dem Stream (Algorithmus 3.2)
@@ -92,133 +76,32 @@ impl SDOstreamclust {
         &mut self,
         point: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<()> {
-        // Bestimme aktuelle Zeit vor dem Aufruf von learn()
-        let current_time = if self.sdostream.get_use_explicit_time() {
-            if let Some(time_array) = &time {
-                let time_slice = time_array.as_array();
-                if time_slice.len() != 1 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "Zeit muss ein 1D-Array mit einem Wert sein",
-                    ));
-                }
-                time_slice[[0]]
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "time-Parameter ist erforderlich",
-                ));
-            }
-        } else {
-            (self.sdostream.get_data_points_processed() + 1) as f64
-        };
+    ) -> PyResult<(i32, f64)> {
+        
+        // Extract point vector
+        let point_vec = point_to_vec(point);
 
-        // Schritt 1: SDOstream (Algorithmus 11)
-        self.sdostream.learn(point, time)?;
+        // Determine current time based on initialization strategy
+        let current_time = time_to_f64(
+            time,
+            self.sdostream.get_use_explicit_time(),
+            self.sdostream.get_data_points_processed(),
+        )?;
 
-        // Schritt 2: Cluster (Algorithmus 3.3) - verwende learn_cluster direkt
-        // Berechne chi: chi = max(chi_min, chi_prop * k)
-        let chi = (self.chi_min as f64).max(self.chi_prop * (self.k as f64)) as usize;
-        let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
-            chi,
-            self.zeta,
-            self.min_cluster_size,
-            false,
-        );
+        // Call internal learn implementation
+        let (predicted_label, outlier_score) = self.learn_impl(&point_vec, current_time);
 
-        // Konvertiere HashMap zu Vec<HashSet<usize>> für label_clusters
-        let clusters: Vec<HashSet<usize>> = cluster_map.into_values().collect();
-
-        // Schritt 3: Label (Algorithmus 3.5)
-        let cluster_labels = self.sdostream.get_sdo().observers.label_clusters(&clusters);
-
-        // Schritt 4 & 5: Update Cluster-Beobachtungen (Fading und/oder Cluster-Updates)
-        let fading = self.sdostream.get_fading();
-        self.sdostream
-            .get_sdo_mut()
-            .observers
-            .update_cluster_observations_with_fading_and_clusters(
-                fading,
-                current_time,
-                &clusters,
-                &cluster_labels,
-            );
-
-        // Cache cluster-spezifische predict Informationen
-        if let Some(ref cached_indices) = self.sdostream.get_cached_nearest_active_indices() {
-            let label_scores = self
-                .sdostream
-                .get_sdo()
-                .observers
-                .get_normalized_cluster_scores(cached_indices);
-
-            self.cached_cluster_scores = Some(label_scores);
-        }
-
-        Ok(())
+        Ok((predicted_label, outlier_score))
     }
 
     /// Berechnet das Cluster-Label für einen Datenpunkt (Gleichung 3.4)
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<i32> {
-        let point_slice = point.as_array();
-        if point_slice.nrows() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
-            ));
-        }
+    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
 
-        let point_vec: Vec<f64> = (0..point_slice.ncols())
-            .map(|j| point_slice[[0, j]])
-            .collect();
+        let point_vec = point_to_vec(point);
 
-        // Prüfe ob wir gecachte Ergebnisse verwenden können
-        if let (Some(ref cached_point), Some(ref cached_scores)) = (
-            self.sdostream.get_cached_point(),
-            &self.cached_cluster_scores,
-        ) {
-            // Verifiziere dass Cache für den gleichen Punkt ist (mit Toleranz für Fließkomma)
-            if self.sdostream.get_cached_nearest_active_indices().is_some()
-                && crate::sdostream_impl::SDOstream::points_match(&point_vec, cached_point)
-                && self.sdostream.is_cache_valid()
-            {
-                // Verwende gecachte Cluster-Scores - dies ist der "kostenlose" predict!
-                let predicted_label = cached_scores
-                    .iter()
-                    .max_by(|(_, &a), (_, &b)| {
-                        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(&label, _)| label)
-                    .unwrap_or(-1); // -1 wenn keine Beobachtungen
+        let (predicted_label, outlier_score) = self.predict_impl(&point_vec);
 
-                return Ok(predicted_label);
-            }
-        }
-
-        // Fallback: neu berechnen wenn Cache ungültig
-        // Finde x-nächste aktive Observer (using optimized unified search mit aktiven info)
-        let x = self.sdostream.x();
-        let (active_neighbors, _, _) = self
-            .sdostream
-            .get_sdo()
-            .observers
-            .search_neighbors_unified(&point_vec, x, true);
-        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-
-        // Berechne normalisierte Cluster-Scores der x-nächsten Observer
-        let label_scores = self
-            .sdostream
-            .get_sdo()
-            .observers
-            .get_normalized_cluster_scores(&nearest_indices);
-
-        // Finde Label mit maximalem Score: argmax_c (Σ_ω l̂_ω^c)
-        // wobei l̂_ω normalisiert ist
-        let predicted_label = label_scores
-            .iter()
-            .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(&label, _)| label)
-            .unwrap_or(-1); // -1 wenn keine Beobachtungen
-
-        Ok(predicted_label)
+        Ok((predicted_label, outlier_score))
     }
 
     /// Gibt x zurück (Anzahl der nächsten Nachbarn)
@@ -227,30 +110,122 @@ impl SDOstreamclust {
         self.sdostream.x()
     }
 
-    /// Berechnet den Outlier-Score für einen Datenpunkt (delegiert an SDOstream)
-    pub fn predict_outlier_score(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        self.sdostream.predict(point)
+    /// Gibt aktuelle Cluster-Informationen zurück
+    #[getter]
+    pub fn get_clusters(&mut self) -> PyResult<Vec<Vec<usize>>> {
+        // Berechne aktuelle Cluster
+        let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
+            self.chi,
+            self.zeta,
+            self.min_cluster_size,
+            true, // read-only mode
+        );
+        
+        // Convert to Vec<Vec<usize>>
+        let clusters: Vec<Vec<usize>> = cluster_map
+            .into_values()
+            .map(|set| set.into_iter().collect())
+            .collect();
+        
+        Ok(clusters)
+    }
+
+    /// Gibt die Anzahl der verarbeiteten Datenpunkte zurück
+    #[getter]
+    pub fn data_points_processed(&self) -> usize {
+        self.sdostream.get_data_points_processed()
+    }
+}
+
+impl SDOstreamclust {
+    /// Interner Zugriff auf mutable SDOstream
+    pub fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
+        // Verwende SDOstream für Modell-Erstellung (Sample, Observe, Clean)
+        let (median, nearest_active_indices) = self.sdostream.learn_impl(&point, time);
+
+        // Schritt 2: Cluster (Algorithmus 3.3)
+        // Get mutable reference to observers
+        // This requires that get_sdo_mut() returns &mut to the SDO object
+        let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
+            self.chi,
+            self.zeta,
+            self.min_cluster_size,
+            false,
+        );
+        
+        // Konvertiere HashMap zu Vec<HashSet<usize>> für label_clusters
+        let clusters: Vec<HashSet<usize>> = cluster_map.into_values().collect();
+
+        // Schritt 3: Label (Algorithmus 3.5)
+        let cluster_labels = self.sdostream.get_sdo().observers.label_clusters(&clusters);
+
+        // Schritt 4 & 5: Update Cluster-Beobachtungen
+        let fading = self.sdostream.get_fading();
+        self.sdostream
+            .get_sdo_mut()
+            .observers
+            .update_cluster_observations_with_fading_and_clusters(
+                fading,
+                time,
+                &clusters,
+                &cluster_labels,
+            );
+
+        let predicted_label = self.compute_label(&nearest_active_indices);
+
+        (predicted_label, median)
+    }
+
+    pub fn predict_impl(&self, point: &Vec<f64>) -> (i32, f64) {
+        let (median, nearest_active_indices) = self.sdostream.predict_impl(point);
+        
+        let predicted_label = self.compute_label(&nearest_active_indices);
+
+        (predicted_label, median)
+    }
+}
+
+impl SDOstreamclust {
+    pub fn compute_label(&self, indices: &Vec<usize>) -> i32 {
+        if indices.is_empty() {
+            panic!("No active observers found during prediction!");
+        }
+
+        // Berechne normalisierte Cluster-Scores der x-nächsten Observer
+        let label_scores = self
+                .sdostream
+                .get_sdo()
+                .observers
+                .get_normalized_cluster_scores(&indices);        
+
+        // Finde Label mit maximalem Score
+        let predicted_label = label_scores
+            .iter()
+            .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&label, _)| label)
+            .unwrap_or(-1); // -1 wenn keine Beobachtungen
+        predicted_label
+    }
+
+    /// Gibt eine Referenz auf das interne SDOstream-Objekt zurück
+    pub fn get_sdostream(&self) -> &SDOstream {
+        &self.sdostream
+    }
+
+    /// Gibt eine mutable Referenz auf das interne SDOstream-Objekt zurück
+    pub fn get_sdostream_mut(&mut self) -> &mut SDOstream {
+        &mut self.sdostream
     }
 }
 
 impl Default for SDOstreamclust {
     fn default() -> Self {
-        Self::new(
-            200,
-            5,
-            100.0,
-            None, // t_sampling = t_fading
-            1,    // chi_min
-            0.05, // chi_prop
-            0.6,
-            2,
-            "euclidean".to_string(),
-            None,
-            0.1,
-            None,
-            None,
-            None,
-        )
-        .unwrap()
+        // Don't unwrap here - return a proper default or handle error
+        Self {
+            sdostream: SDOstream::default(),
+            chi: 10,
+            zeta: 0.6,
+            min_cluster_size: 2,
+        }
     }
 }

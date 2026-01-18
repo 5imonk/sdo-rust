@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -544,7 +543,7 @@ impl ObserverSet {
         k: usize,
         active: bool,
     ) -> Vec<f64> {
-        let (neighbors, _, _) = self.search_neighbors_unified(query_point, k, active);
+        let (neighbors, _) = self.search_neighbors_unified(query_point, k, active);
         neighbors.iter().map(|n| n.distance).collect()
     }
 
@@ -557,39 +556,56 @@ impl ObserverSet {
         k: usize,
         active: bool,
     ) -> Vec<usize> {
-        let (neighbors, _, _) = self.search_neighbors_unified(query_point, k, active);
+        let (neighbors, _) = self.search_neighbors_unified(query_point, k, active);
         neighbors.iter().map(|n| n.index).collect()
     }
 
     /// Single-pass unified search returning neighbor info and active count
-    /// Optimizes by iterating through observers once while tracking both all and active neighbors
-    /// Returns (all_neighbors, active_neighbors, active_neighbor_count) where:
-    /// - all_neighbors: All k-nearest neighbors regardless of active status
-    /// - active_neighbors: Only active neighbors among the k-nearest (filtered)
-    /// - active_neighbor_count: Number of active neighbors found
+    /// Optimizes by tracking k-nearest neighbors during iteration with worst candidate replacement
+    /// Returns (all_neighbors, active_neighbors) where:
+    /// - all_neighbors: k-nearest neighbors regardless of active status
+    /// - active_neighbors: k-nearest active neighbors only
     pub fn search_neighbors_unified(
         &self,
         query_point: &[f64],
         k: usize,
         active_only: bool,
-    ) -> (Vec<NeighborInfo>, Vec<NeighborInfo>, usize) {
+    ) -> (Vec<NeighborInfo>, Vec<NeighborInfo>) {
         let mut nearest = Vec::with_capacity(k);
         let mut nearest_active = Vec::with_capacity(k);
         let total_observers = self.observers_by_index.len();
 
-        // Handle edge case: k > available observers
-        let effective_k = if k > total_observers {
-            println!(
-                "Warning: k ({}) is greater than available observers ({}), using all observers",
-                k, total_observers
-            );
-            total_observers
-        } else {
-            k
+        // Handle edge case: k = 0
+        if k == 0 {
+            panic!("k must be greater than 0 for neighbor search.");
+        }
+
+        // Handle edge case: empty observer set
+        if total_observers == 0 {
+            panic!("ObserverSet is empty - cannot search for neighbors.");
+        }
+
+        // Helper function to update k-nearest vectors with worst candidate replacement
+        let update_k_nearest = |candidates: &mut Vec<NeighborInfo>, neighbor_info: NeighborInfo| {
+            if candidates.len() < k {
+                candidates.push(neighbor_info);
+            } else {
+                // Find worst candidate (max distance)
+                let worst_idx = candidates
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.distance.partial_cmp(&b.distance).unwrap())
+                    .map(|(idx, _)| idx)
+                    .unwrap();
+
+                // Replace if new neighbor is closer than current worst
+                if neighbor_info.distance < candidates[worst_idx].distance {
+                    candidates[worst_idx] = neighbor_info;
+                }
+            }
         };
 
-        // Single pass through sorted observers (indices_by_obs is already sorted by observations)
-        // Key: First num_active observers are TRULY active, others are inactive by definition
+        // Single pass through sorted observers
         for (position, (_obs_key, &observer_index)) in self.indices_by_obs.iter().enumerate() {
             let observer = match self.observers_by_index.get(&observer_index) {
                 Some(obs) => obs,
@@ -597,7 +613,6 @@ impl ObserverSet {
             };
 
             // Determine active status from position in sorted order
-            // First num_active observers are active by definition
             let is_active = position < self.num_active;
 
             // Skip if only active observers requested and this one is inactive
@@ -619,47 +634,18 @@ impl ObserverSet {
                 is_active,
             };
 
-            // Store in all neighbors
-            nearest.push(neighbor_info.clone());
-
-            // Store in active neighbors if applicable
-            if is_active {
-                nearest_active.push(neighbor_info);
+            // Update nearest (all observers if not active_only)
+            if !active_only {
+                update_k_nearest(&mut nearest, neighbor_info.clone());
             }
 
-            // Smart early termination conditions
-            if active_only {
-                // For active-only: stop when we have k active neighbors
-                if nearest_active.len() >= effective_k {
-                    break;
-                }
-            } else {
-                // For all observers: stop when we have k total neighbors
-                if nearest.len() >= effective_k {
-                    break;
-                }
+            // Update nearest_active (only active observers)
+            if is_active {
+                update_k_nearest(&mut nearest_active, neighbor_info);
             }
         }
 
-        // Sort by distance and truncate to k nearest
-        nearest.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(Ordering::Equal)
-        });
-        nearest.truncate(effective_k);
-
-        // Sort active neighbors by distance and truncate to k nearest
-        nearest_active.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(Ordering::Equal)
-        });
-        nearest_active.truncate(effective_k);
-
-        let active_neighbor_count = nearest_active.len();
-
-        (nearest, nearest_active, active_neighbor_count)
+        (nearest, nearest_active)
     }
 
     /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste

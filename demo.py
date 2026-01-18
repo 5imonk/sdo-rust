@@ -5,7 +5,6 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 sys.path.append('/home/simon/sdo/.venv/lib/python3.12/site-packages')
 
-from python.sdostreamclust_sklearn import SDOstreamclustClusterer
 import numpy as np
 import pandas as pd
 from scipy.io.arff import loadarff
@@ -110,7 +109,7 @@ chi_prop = 0.05 # Proportion of k for chi calculation
 zeta = 0.6 # Mixing-Parameter
 min_cluster_size = 2 # Minimale Clustergröße
 
-classifier = SDOstreamclustClusterer(
+classifier = SDOstreamclust(
     k=k, 
     x=x_neighbors, 
     t_fading=T,

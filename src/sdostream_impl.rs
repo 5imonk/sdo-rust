@@ -1,10 +1,12 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::{thread_rng, Rng};
+use core::panic;
 use std::f64;
 
 use crate::obs::Observer;
 use crate::sdo_impl::SDO;
+use crate::utils::{data_to_matrix, point_to_vec, sample_random_matrix_distr, time_to_f64, compute_median};
 
 impl SDOstream {
     /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
@@ -28,12 +30,6 @@ pub struct SDOstream {
     use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
     last_replacement_time: f64, // Zeit der letzten Prüfung/Ersetzung (für Lazy Replacement)
     pending_replacements: usize, // Anzahl der ausstehenden Ersetzungen (wenn num_replacements > 1)
-
-    // Caching fields for predict() optimization
-    cached_point: Option<Vec<f64>>, // Cached point from last learn()
-    cached_nearest_active_indices: Option<Vec<usize>>, // Cached nearest active observer indices
-    cached_nearest_active_distances: Option<Vec<f64>>, // Cached distances to nearest active observers
-    cache_valid: bool,                                 // Whether cache is valid
 }
 
 #[pymethods]
@@ -64,62 +60,25 @@ impl SDOstream {
             t_fading,
             t_sampling: t_sampling_value,
             rho,
-            use_explicit_time: false,   // Default: auto-increment
-            last_replacement_time: 0.0, // Startzeit für Lazy Replacement
-            pending_replacements: 0,    // Keine ausstehenden Ersetzungen
-
-            // Initialize cache fields
-            cached_point: None,
-            cached_nearest_active_indices: None,
-            cached_nearest_active_distances: None,
-            cache_valid: false,
+            use_explicit_time: time.is_some(), // Default: auto-increment
+            last_replacement_time: 0.0,        // Startzeit für Lazy Replacement
+            pending_replacements: 0,           // Keine ausstehenden Ersetzungen
         };
 
-        // Initialisiere mit Parametern (wenn Daten/Dimension/Zeit angegeben)
-        if data.is_some() || dimension.is_some() || time.is_some() {
-            instance.initialize(dimension, data, time)?;
-        }
+        instance.initialize(dimension, data, time)?;
 
         Ok(instance)
     }
 
-    /// Initialisiert das Modell mit Parametern
-    /// Kann optional mit einem Datensatz oder zufälligen Punkten initialisiert werden
-    /// Wenn time nicht angegeben, wird time=0 verwendet
-    ///
-    /// Verwendung:
-    /// - initialize() - nur Parameter setzen (auto-increment Zeit)
-    /// - initialize(data=data, time=time) - mit Datensatz
-    ///   - Wenn time angegeben: erwartet learn() time-Parameter für jeden Punkt
-    ///   - Wenn time nicht angegeben: verwendet auto-increment (Zähler)
-    /// - initialize(dimension, time=time) - mit zufälligen Punkten
+    /// Initialisiert das Modell mit gegebenen Daten oder Dimension
+    /// Wenn data gegeben, wird dieses verwendet; sonst werden k zufällige Punkte generiert
+    #[pyo3(signature = (*, dimension = None, data = None, time = None))]
     pub fn initialize(
         &mut self,
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<()> {
-        // Entscheide Zeit-Strategie: Wenn time bei Initialisierung angegeben, erwarte time bei learn()
-        // Sonst verwende auto-increment basierend auf data_points_processed
-        self.use_explicit_time = time.is_some();
-
-        // Bestimme Startzeit für exponentielles Sampling
-        let start_time = if let Some(time_array) = &time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() != 1 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Zeit muss ein 1D-Array mit einem Wert sein",
-                ));
-            }
-            time_slice[[0]]
-        } else {
-            0.0
-        };
-
-        // Initialisiere Lazy Replacement: Startzeit setzen
-        self.last_replacement_time = start_time;
-        self.pending_replacements = 0; // Keine ausstehenden Ersetzungen bei Initialisierung
-
         // Prüfe, ob sowohl data als auch dimension gegeben sind (Fehler)
         if data.is_some() && dimension.is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -127,87 +86,20 @@ impl SDOstream {
             ));
         }
 
-        // Prüfe, ob data oder dimension gegeben ist
-        if let Some(data_array) = data {
-            // Verwende SDO's learn-Methode für das initiale Training
-            // time wird direkt an learn() übergeben (wird auf t0 gesetzt wenn angegeben)
-            self.sdo.learn(data_array, time)?;
-        } else if let Some(dim) = dimension {
-            // Initialisierung mit zufälligen normalverteilten Punkten
-            if dim == 0 || self.k == 0 {
-                return Ok(());
-            }
-
-            // Bestimme Zeit für alle Punkte
-            let t0 = if let Some(time_array) = &time {
-                let time_slice = time_array.as_array();
-                if time_slice.len() != 1 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "Zeit muss ein 1D-Array mit einem Wert sein",
-                    ));
-                }
-                time_slice[[0]]
-            } else {
-                0.0 // Default: time = 0
-            };
-
-            // Generiere k normalverteilte Punkte mit Box-Muller Transformation
-            let mut random_data_normal: Vec<Vec<f64>> = Vec::new();
-            let mut rng = thread_rng();
-            for _ in 0..self.k {
-                let mut point: Vec<f64> = Vec::new();
-                let mut i = 0;
-                while i < dim {
-                    if i + 1 < dim {
-                        // Box-Muller: generiere zwei normalverteilte Werte
-                        let u1: f64 = rng.gen();
-                        let u2: f64 = rng.gen();
-                        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                        let z1 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).sin();
-                        point.push(z0);
-                        point.push(z1);
-                        i += 2;
-                    } else {
-                        // Letzte Dimension: generiere einen normalverteilten Wert
-                        let u1: f64 = rng.gen();
-                        let u2: f64 = rng.gen();
-                        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                        point.push(z0);
-                        i += 1;
-                    }
-                }
-                random_data_normal.push(point);
-            }
-
-            // Hole distance_metric und minkowski_p aus ObserverSet (wurden oben gesetzt)
-            let distance_metric = self.sdo.observers.get_distance_metric();
-            let minkowski_p = self.sdo.observers.get_minkowski_p();
-
-            // Erstelle ObserverSet mit zufälligen Punkten
-            self.sdo.observers = crate::obset::ObserverSet::new();
-            self.sdo
-                .observers
-                .set_tree_params(distance_metric, minkowski_p);
-
-            for (idx, point_data) in random_data_normal.iter().enumerate() {
-                let observer = crate::obs::Observer {
-                    data: point_data.clone(),
-                    observations: 1.0, // Start mit 1 observation
-                    time: t0,
-                    age: 1.0,
-                    index: idx,
-                    label: None,
-                    cluster_observations: Vec::new(),
-                };
-                self.sdo.observers.insert(observer);
-            }
-
-            // Setze num_active basierend auf rho
-            self.sdo.observers.set_num_active(
-                ((self.sdo.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize,
-            );
+        if !data.is_some() && !dimension.is_some() {
+            // Kein data und keine dimension → leeres Modell initialisieren
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Entweder 'data' oder 'dimension' muss angegeben werden",
+            ));
         }
-        // Wenn weder data noch dimension gegeben ist, bleibt ObserverSet leer (nur Parameter gesetzt)
+
+        let start_time = time_to_f64(time, self.use_explicit_time, 0)?;
+        let data_vec = match data {
+            Some(data_array) => Some(data_to_matrix(data_array)),
+            None => None,
+        };
+
+        self.initialize_impl(dimension, data_vec.as_ref(), start_time)?;
 
         Ok(())
     }
@@ -218,117 +110,25 @@ impl SDOstream {
         &mut self,
         point: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<()> {
-        let point_slice = point.as_array();
-        if point_slice.nrows() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
-            ));
-        }
-
-        let point_vec: Vec<f64> = (0..point_slice.ncols())
-            .map(|j| point_slice[[0, j]])
-            .collect();
+    ) -> PyResult<f64> {
+        let point_vec: Vec<f64> = point_to_vec(point);
 
         // Bestimme Zeit basierend auf Initialisierungs-Strategie
-        let current_time = if self.use_explicit_time {
-            // Erwarte time-Parameter wenn bei Initialisierung time angegeben wurde
-            if let Some(time_array) = time {
-                let time_slice = time_array.as_array();
-                if time_slice.len() != 1 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "Zeit muss ein 1D-Array mit einem Wert sein",
-                    ));
-                }
-                time_slice[[0]]
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "time-Parameter ist erforderlich (wurde bei Initialisierung mit time initialisiert)",
-                ));
-            }
-        } else {
-            // Auto-increment: verwende data_points_processed als Zeit
-            // Ignoriere time-Parameter wenn gegeben (aber nicht erforderlich)
-            (self.data_points_processed + 1) as f64
-        };
+        let current_time = time_to_f64(time, self.use_explicit_time, self.data_points_processed)?;
 
-        // Schritt 1: Finde x-nächste Observer (verwende optimierte unified search mit active count)
-        let x = self.sdo.x;
+        let (median, _nearest_active_indices) = self.learn_impl(&point_vec, current_time);
 
-        // Schritt 1a: Finde alle Observer für learning
-        let (all_neighbors, _, _) = self
-            .sdo
-            .observers
-            .search_neighbors_unified(&point_vec, x, false);
-        let nearest_observer_indices: Vec<usize> = all_neighbors.iter().map(|n| n.index).collect();
-
-        // Schritt 1b: Finde und cache x-nächste AKTIVE Observer für zukünftige predict() Aufrufe
-        let (active_neighbors, _, active_count) = self
-            .sdo
-            .observers
-            .search_neighbors_unified(&point_vec, x, true);
-        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-        let nearest_active_distances: Vec<f64> =
-            active_neighbors.iter().map(|n| n.distance).collect();
-
-        // Update cache mit den Informationen für predict()
-        self.cached_point = Some(point_vec.clone());
-        self.cached_nearest_active_indices = Some(nearest_active_indices);
-        self.cached_nearest_active_distances = Some(nearest_active_distances);
-        self.cache_valid = true;
-
-        // Note: active_count available for future optimizations (smart cache invalidation possible)
-        println!(
-            "Active neighbors found: {} (out of {} total neighbors)",
-            active_count,
-            active_neighbors.len()
-        );
-
-        // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
-        // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
-        self.sdo.observers.update_observations_with_fading(
-            &nearest_observer_indices,
-            self.fading,
-            current_time,
-        );
-
-        // Increment data_points_processed für auto-increment Modus
-        self.data_points_processed += 1;
-
-        // Schritt 3: Sampling - Lazy Replacement basierend auf verstrichener Zeit (Poisson-basiert)
-        self.check_and_replace(current_time, &point_vec)?;
-
-        Ok(())
+        Ok(median)
     }
 
     /// Berechnet den Outlier-Score für einen Datenpunkt (delegiert an SDO)
+    #[pyo3(signature = (point))]
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        let point_slice = point.as_array();
-        if point_slice.nrows() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
-            ));
-        }
+        let point_vec: Vec<f64> = point_to_vec(point);
 
-        let point_vec: Vec<f64> = (0..point_slice.ncols())
-            .map(|j| point_slice[[0, j]])
-            .collect();
+        let (median, _nearest_active_indices) = self.predict_impl(&point_vec);
 
-        // Prüfe ob wir gecachte Ergebnisse verwenden können
-        if let (Some(ref cached_point), Some(ref cached_distances), Some(_cached_indices)) = (
-            &self.cached_point,
-            &self.cached_nearest_active_distances,
-            &self.cached_nearest_active_indices,
-        ) {
-            // Verifiziere dass Cache für den gleichen Punkt ist (mit Toleranz für Fließkomma)
-            if Self::points_match(&point_vec, cached_point) && self.cache_valid {
-                // Verwende gecachte Distanzen - dies ist der "kostenlose" predict!
-                return Ok(Self::compute_median(cached_distances.clone()));
-            }
-        }
-
-        // Fallback: neu berechnen wenn Cache ungültig
-        self.sdo.predict(point)
+        Ok(median)
     }
 
     /// Gibt x zurück (Anzahl der nächsten Nachbarn)
@@ -357,6 +157,108 @@ impl SDOstream {
 }
 
 impl SDOstream {
+    pub(crate) fn initialize_impl(
+        &mut self,
+        dimension: Option<usize>,
+        data: Option<&Vec<Vec<f64>>>,
+        time: f64,
+    ) -> PyResult<()> {
+        // Implementation moved to initialize() method above
+
+        // Determine what data to use
+        let data_points = match (data, dimension) {
+            // Case 1: User provided data
+            (Some(existing_data), _) => {
+                // Validate dimension if provided
+                if let Some(dim) = dimension {
+                    // Check if all points have correct dimension
+                    for (i, point) in existing_data.iter().enumerate() {
+                        if point.len() != dim {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Point {} has dimension {} but expected {}",
+                                i,
+                                point.len(),
+                                dim
+                            )));
+                        }
+                    }
+                }
+                existing_data.clone() // Clone the user's data
+            }
+            // Case 2: No data provided but dimension specified → generate random data
+            (None, Some(dim)) => sample_random_matrix_distr(dim, self.k),
+            // Case 3: No data and no dimension → initialize empty
+            (None, None) => {
+                self.sdo.observers.set_num_active(0);
+                return Ok(());
+            }
+        };
+
+        for (idx, point_data) in data_points.iter().enumerate() {
+            let observer = crate::obs::Observer {
+                data: point_data.clone(),
+                observations: 1.0, // Start mit 1 observation
+                time: time,
+                age: 1.0,
+                index: idx,
+                label: None,
+                cluster_observations: Vec::new(),
+            };
+            self.sdo.observers.insert(observer);
+        }
+
+        // Setze num_active basierend auf rho
+        self.sdo
+            .observers
+            .set_num_active(((self.sdo.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
+
+        // Initialisiere Lazy Replacement: Startzeit setzen
+        self.last_replacement_time = time;
+        self.pending_replacements = 0; // Keine ausstehenden Ersetzungen bei Initialisierung
+
+        Ok(())
+    }
+
+    pub(crate) fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (f64, Vec<usize>) {
+        // Schritt 1: Finde x-nächste Observer (verwende optimierte unified search mit active count)
+        let x = self.sdo.x;
+
+        // Schritt 1a: Finde alle Observer für learning
+        let (all_neighbors, active_neighbors) = self
+            .sdo
+            .observers
+            .search_neighbors_unified(&point, x, false);
+        let nearest_observer_indices: Vec<usize> = all_neighbors.iter().map(|n| n.index).collect();
+
+        let nearest_active_distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+        let median = if !nearest_active_distances.is_empty() {
+            compute_median(&nearest_active_distances)
+        } else {
+            f64::INFINITY
+        };
+
+        // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
+        // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
+        self.sdo.observers.update_observations_with_fading(
+            &nearest_observer_indices,
+            self.fading,
+            time,
+        );
+        // Increment data_points_processed für auto-increment Modus
+        self.data_points_processed += 1;
+
+        // Schritt 3: Sampling - Lazy Replacement basierend auf verstrichener Zeit (Poisson-basiert)
+        self.sample_impl(&point, time);
+
+        (median, nearest_active_indices)
+    }
+
+    pub(crate) fn predict_impl(&self, point: &Vec<f64>) -> (f64, Vec<usize>) {
+        let (median, nearest_active_indices) = self.sdo.predict_impl(point);
+        (median, nearest_active_indices)
+    }
+
     /// Gibt fading zurück (für interne Verwendung)
     pub(crate) fn get_fading(&self) -> f64 {
         self.fading
@@ -382,68 +284,17 @@ impl SDOstream {
         &mut self.sdo
     }
 
-    /// Helper function to check if two points match within tolerance
-    pub fn points_match(point1: &[f64], point2: &[f64]) -> bool {
-        if point1.len() != point2.len() {
-            return false;
-        }
-        const TOLERANCE: f64 = 1e-10;
-        for (a, b) in point1.iter().zip(point2.iter()) {
-            if (a - b).abs() > TOLERANCE {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Helper function to compute median of distances
-    pub fn compute_median(mut distances: Vec<f64>) -> f64 {
-        if distances.is_empty() {
-            return f64::INFINITY;
-        }
-
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mid = distances.len() / 2;
-        if distances.len().is_multiple_of(2) && mid > 0 {
-            (distances[mid - 1] + distances[mid]) / 2.0
-        } else {
-            distances[mid]
-        }
-    }
-
-    /// Invalidate the cache (call when observer set changes)
-    fn invalidate_cache(&mut self) {
-        self.cache_valid = false;
-        self.cached_point = None;
-        self.cached_nearest_active_indices = None;
-        self.cached_nearest_active_distances = None;
-    }
-
-    /// Get cache validity for external access
-    pub(crate) fn is_cache_valid(&self) -> bool {
-        self.cache_valid
-    }
-
-    /// Get cached point for external access
-    pub(crate) fn get_cached_point(&self) -> &Option<Vec<f64>> {
-        &self.cached_point
-    }
-
-    /// Get cached nearest active indices for external access
-    pub(crate) fn get_cached_nearest_active_indices(&self) -> &Option<Vec<usize>> {
-        &self.cached_nearest_active_indices
-    }
 }
 
 impl SDOstream {
     /// Prüft und führt Ersetzungen basierend auf verstrichener Zeit durch (Lazy Replacement)
     /// Verwendet Poisson-Verteilung für die Anzahl der Ersetzungen
     /// Funktioniert sowohl für einzelne Punkte als auch für Batches
-    fn check_and_replace(&mut self, current_time: f64, new_point: &[f64]) -> PyResult<()> {
-        let elapsed = current_time - self.last_replacement_time;
+    fn sample_impl(&mut self, point: &[f64], time: f64) -> Option<usize> {
+        let elapsed = time - self.last_replacement_time;
 
         if elapsed <= 0.0 {
-            return Ok(()); // Keine Zeit vergangen oder Zeit geht zurück
+            panic!("Ungültige Zeit: current time muss größer als last_replacement_time sein");
         }
 
         // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / t_sampling
@@ -458,17 +309,25 @@ impl SDOstream {
         let total_replacements = num_replacements + self.pending_replacements;
 
         // Führe nur eine Ersetzung durch (auch wenn total_replacements > 1)
-        if total_replacements > 0 {
-            self.replace_observer(new_point, current_time)?;
-            self.last_replacement_time = current_time;
-
-            // Speichere verbleibende Ersetzungen für nächste Aufrufe
-            self.pending_replacements = total_replacements - 1;
+        if total_replacements == 0 {
+            return None; // Keine Ersetzungen
         }
+
+        let idx = self.replace_observer(point, time)?;
+
+        if Some(idx).is_none() {
+            return None; // Keine Ersetzungen möglich
+        }
+
+        self.last_replacement_time = time;
+
+        // Speichere verbleibende Ersetzungen für nächste Aufrufe
+        self.pending_replacements = total_replacements - 1;
+        
         // Wenn total_replacements == 0: last_replacement_time bleibt unverändert
         // (Zeit wird beim nächsten Aufruf akkumuliert)
 
-        Ok(())
+        Some(idx)
     }
 
     /// Generiert eine Poisson-verteilte Zufallszahl
@@ -508,23 +367,24 @@ impl SDOstream {
     }
 
     /// Ersetzt einen Observer basierend auf normalisierter Qualitätsmetrik P̃ω = Pω / Hω
-    fn replace_observer(&mut self, new_point: &[f64], current_time: f64) -> PyResult<()> {
+    fn replace_observer(&mut self, point: &[f64], time: f64) -> Option<usize> {
         // Verwende die optimierte find_k_worst_normalized_scores Methode - O(1) statt O(n)
         let worst_scores = self.sdo.observers.find_k_worst_normalized_scores(Some(1));
         let (replace_idx, _score) = match worst_scores.first() {
             Some((idx, score)) => (*idx, *score),
-            None => return Ok(()), // Keine Observer vorhanden
+            None => return None, // Keine Observer vorhanden
         };
 
         // Erstelle neuen Observer
         // Für neue Observer: time sollte auf die aktuelle Zeit gesetzt werden
         // Da wir hier keine Zeit haben, verwenden wir 0.0 (wird beim nächsten Update korrigiert)
+        let new_index = self.data_points_processed;
         let new_observer = Observer {
-            data: new_point.to_vec(),
-            observations: 1.0,  // Neuer Observer startet mit Pω = 1
-            time: current_time, // Setze time auf aktuelle Zeit
-            age: 1.0,           // Neuer Observer startet mit Hω = 1
-            index: self.data_points_processed,
+            data: point.to_vec(),
+            observations: 1.0, // Neuer Observer startet mit Pω = 1
+            time: time,        // Setze time auf aktuelle Zeit
+            age: 1.0,          // Neuer Observer startet mit Hω = 1
+            index: new_index as usize,
             label: None,
             cluster_observations: Vec::new(),
         };
@@ -532,10 +392,7 @@ impl SDOstream {
         // Verwende SDO's replace_observer Methode - O(log n)
         self.sdo.replace_observer(replace_idx, new_observer);
 
-        // Invalidiere Cache da Observer-Set sich geändert hat
-        self.invalidate_cache();
-
-        Ok(())
+        Some(new_index)
     }
 }
 

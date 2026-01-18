@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::f64;
 
 use crate::sdo_impl::SDO;
+use crate::utils::{data_to_matrix, point_to_vec};
 
 /// Sparse Data Observers Clustering (SDOclust) Algorithm
 #[pyclass]
@@ -44,73 +45,57 @@ impl SDOclust {
 
     /// Lernt das Modell aus den Daten und führt Clustering durch
     pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
-        let data_slice = data.as_array();
-        let rows = data_slice.nrows();
+        // Konvertiere Daten zu Vec<Vec<f64>>
+        let data_vec = data_to_matrix(data);
 
+        // Anzahl der Datenpunkte
+        let rows = data_vec.len();
+
+        // Überprüfe auf leere Daten oder k=0
         if rows == 0 || self.k == 0 {
             return Ok(());
         }
 
-        // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
-        self.sdo.learn(data, None)?;
+        // Überprüfe, ob Anzahl der Datenpunkte mindestens k ist
+        if rows < self.k {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Anzahl der Datenpunkte muss mindestens k sein",
+            ));
+        }
 
-        // Führe Clustering durch (schreibe Labels in obs.label)
-        self.sdo
-            .observers
-            .learn_cluster(self.chi, self.zeta, self.min_cluster_size, true);
+        // Rufe die interne Lernmethode auf
+        self.learn_impl(&data_vec);
 
         Ok(())
     }
 
-    /// Berechnet den Outlier-Score für einen Datenpunkt (wie SDO)
-    pub fn predict_outlier_score(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        self.sdo.predict(point)
-    }
-
     /// Berechnet das Cluster-Label für einen Datenpunkt
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<i32> {
+    pub fn predict(
+        &self,
+        point: PyReadonlyArray2<f64>,
+        outlier_score_flag: bool,
+    ) -> PyResult<(i32, f64)> {
         if self.sdo.observers.is_empty() {
-            return Ok(-1); // Kein Label (Outlier)
+            return Ok((-1, f64::NAN)); // Kein Label (Outlier)
         }
 
-        let point_slice = point.as_array();
-        if point_slice.nrows() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
-            ));
-        }
+        // Konvertiere Punkt zu Vec<f64>
+        let point_vec = point_to_vec(point);
 
-        let point_vec: Vec<f64> = (0..point_slice.ncols())
-            .map(|j| point_slice[[0, j]])
-            .collect();
+        // Rufe die interne Vorhersagemethode auf
+        let label = self.predict_impl(&point_vec);
 
-        // Finde die x nächsten Nachbarn unter den aktiven Observers (using optimized unified search)
-        let (active_neighbors, _, _) = self
-            .sdo
-            .observers
-            .search_neighbors_unified(&point_vec, self.sdo.x, true);
-        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-
-        // Zähle die Häufigkeit der Labels
-        let mut label_counts: HashMap<i32, usize> = HashMap::new();
-        for idx in nearest_indices {
-            if let Some(obs) = self.sdo.observers.get(idx) {
-                if let Some(label) = obs.label {
-                    if label >= 0 {
-                        *label_counts.entry(label).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-
-        // Gib das häufigste Label zurück (optimiert mit vorgefilterten aktiven Observers)
-        if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
-            Ok(most_common_label)
-        } else {
-            Ok(-1) // Kein Label gefunden (Outlier)
-        }
+        let (outlier_score, _nearest_active_indices) = match outlier_score_flag {
+            true => self.sdo.predict_impl(&point_vec),
+            false => (f64::NAN, Vec::new()),
+        };
+        Ok((label, outlier_score))
     }
 
+    /// Konvertiert active_observers zu NumPy-Array für Python
+    pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
+        self.sdo.get_active_observers(py)
+    }
     /// Gibt die Anzahl der Cluster zurück
     pub fn n_clusters(&self) -> usize {
         // Stelle sicher, dass Clustering durchgeführt wurde
@@ -130,6 +115,50 @@ impl SDOclust {
     pub fn x(&self) -> usize {
         self.sdo.x
     }
+}
+
+impl SDOclust {
+    pub fn learn_impl(&mut self, data: &Vec<Vec<f64>>) {
+        // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
+        self.sdo.learn_impl(data);
+
+        // Führe Clustering durch (schreibe Labels in obs.label)
+        self.sdo
+            .observers
+            .learn_cluster(self.chi, self.zeta, self.min_cluster_size, true);
+    }
+
+    pub fn predict_impl(&self, point: &Vec<f64>) -> i32 {
+        if self.sdo.observers.is_empty() {
+            return -1; // Kein Label (Outlier)
+        }
+
+        // Finde die x nächsten Nachbarn unter den aktiven Observers (using optimized unified search)
+        let (active_neighbors, _) = self
+            .sdo
+            .observers
+            .search_neighbors_unified(point, self.sdo.x, true);
+        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+
+        // Zähle die Häufigkeit der Labels
+        let mut label_counts: HashMap<i32, usize> = HashMap::new();
+        for idx in nearest_indices {
+            if let Some(obs) = self.sdo.observers.get(idx) {
+                if let Some(label) = obs.label {
+                    if label >= 0 {
+                        *label_counts.entry(label).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        // Gib das häufigste Label zurück (optimiert mit vorgefilterten aktiven Observers)
+        if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
+            most_common_label
+        } else {
+            -1 // Kein Label gefunden (Outlier)
+        }
+    }
 
     /// Gibt die Labels der Observer zurück (optimiert mit aktiven Observer-Info)
     pub fn get_observer_labels(&self) -> Vec<i32> {
@@ -140,11 +169,6 @@ impl SDOclust {
             .iter_observers(true)
             .map(|obs| obs.label.unwrap_or(-1))
             .collect()
-    }
-
-    /// Konvertiert active_observers zu NumPy-Array für Python
-    pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
-        self.sdo.get_active_observers(py)
     }
 
     /// Calculate Mahalanobis distance uniformity score for a specific cluster

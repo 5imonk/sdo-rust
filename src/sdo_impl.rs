@@ -1,4 +1,4 @@
-use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -7,6 +7,7 @@ use std::f64;
 use crate::obs::Observer;
 use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
+use crate::utils::{data_to_matrix, point_to_vec, compute_median};
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
@@ -50,91 +51,28 @@ impl SDO {
 
     /// Lernt das Modell aus den Daten
     /// Wenn time angegeben, wird dieser Wert für alle Observer als time gesetzt
-    #[pyo3(signature = (data, *, time = None))]
-    pub fn learn(
-        &mut self,
-        data: PyReadonlyArray2<f64>,
-        time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<()> {
-        let data_slice = data.as_array();
-        let rows = data_slice.nrows();
-        let cols = data_slice.ncols();
+    #[pyo3(signature = (data, *))]
+    pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
+        // Konvertiere Daten zu Vec<Vec<f64>>
+        let data_vec = data_to_matrix(data);
 
+        // Anzahl der Datenpunkte
+        let rows = data_vec.len();
+
+        // Überprüfe auf leere Daten oder k=0
         if rows == 0 || self.k == 0 {
             return Ok(());
         }
 
+        // Überprüfe, ob Anzahl der Datenpunkte mindestens k ist
         if rows < self.k {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Anzahl der Datenpunkte muss mindestens k sein",
             ));
         }
 
-        // Konvertiere NumPy-Array zu Vec<Vec<f64>>
-        let data_vec: Vec<Vec<f64>> = (0..rows)
-            .map(|i| (0..cols).map(|j| data_slice[[i, j]]).collect())
-            .collect();
-
-        // Bestimme Zeit für alle Punkte
-        let t0 = if let Some(time_array) = &time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() != 1 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Zeit muss ein 1D-Array mit einem Wert sein",
-                ));
-            }
-            time_slice[[0]]
-        } else {
-            0.0 // Default: time = 0
-        };
-
-        // Schritt 1: Sample
-        let mut rng = thread_rng();
-        let observers_data: Vec<Vec<f64>> = data_vec
-            .choose_multiple(&mut rng, self.k.min(data_vec.len()))
-            .cloned()
-            .collect();
-
-        // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
-        // ObserverSet wurde bereits in initialize() erstellt, aber wir müssen sicherstellen,
-        // dass die Parameter gesetzt sind
-        self.observers
-            .set_tree_params(self.distance_metric, self.minkowski_p);
-        for (idx, observer_data) in observers_data.iter().enumerate() {
-            let observer = Observer {
-                data: observer_data.clone(),
-                observations: 0.0,
-                time: t0,
-                age: rows as f64,
-                index: idx,
-                label: None,
-                cluster_observations: Vec::new(),
-            };
-            self.observers.insert(observer);
-        }
-
-        // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
-
-        // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
-        for data_point in &data_vec {
-            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
-            let (neighbors, _, _) = self
-                .observers
-                .search_neighbors_unified(data_point, self.x, false);
-            let nearest_indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
-
-            // Erhöhe observations für jeden dieser Observer um 1
-            for idx in nearest_indices {
-                if let Some(observer) = self.observers.get(idx) {
-                    let current_obs = observer.observations;
-                    self.observers.update_observations(idx, current_obs + 1.0);
-                }
-            }
-        }
-
-        // Set num_active
-        self.observers
-            .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
+        // Rufe die interne Lernmethode auf
+        self.learn_impl(&data_vec);
 
         Ok(())
     }
@@ -145,47 +83,13 @@ impl SDO {
             return Ok(f64::INFINITY);
         }
 
-        let point_slice = point.as_array();
-        if point_slice.nrows() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Punkt muss ein 1D-Array oder 2D-Array mit einer Zeile sein",
-            ));
-        }
+        // Konvertiere Punkt zu Vec<f64>
+        let point_vec = point_to_vec(point);
 
-        let point_vec: Vec<f64> = (0..point_slice.ncols())
-            .map(|j| point_slice[[0, j]])
-            .collect();
-
-        // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
-        let (active_neighbors, _, _) = self
-            .observers
-            .search_neighbors_unified(&point_vec, self.x, true);
-        let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
-
-        if distances.is_empty() {
-            return Ok(f64::INFINITY);
-        }
-
-        let mid = distances.len() / 2;
-        let median = if distances.len().is_multiple_of(2) && mid > 0 {
-            (distances[mid - 1] + distances[mid]) / 2.0
-        } else {
-            distances[mid]
-        };
+        // Rufe die interne Vorhersagemethode auf
+        let (median, _nearest_active_indices) = self.predict_impl(&point_vec);
 
         Ok(median)
-    }
-
-    /// Calculate Mahalanobis distance uniformity score for subset of observers
-    /// Returns convexity score where lower values indicate more convex (uniform) distribution
-    pub fn get_observer_subset_mahalanobis_score(
-        &self,
-        observer_indices: Option<Vec<usize>>,
-    ) -> f64 {
-        match observer_indices {
-            Some(indices) => self.observers.mahalanobis_uniformity_score(Some(&indices)),
-            None => self.observers.mahalanobis_uniformity_score(None),
-        }
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -215,6 +119,76 @@ impl SDO {
 }
 
 impl SDO {
+    pub(crate) fn learn_impl(&mut self, data: &Vec<Vec<f64>>) {
+        // Schritt 1: Sample
+        let mut rng = thread_rng();
+        let observers_data: Vec<Vec<f64>> = data
+            .choose_multiple(&mut rng, self.k.min(data.len()))
+            .cloned()
+            .collect();
+
+        // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
+        // ObserverSet wurde bereits in initialize() erstellt, aber wir müssen sicherstellen,
+        // dass die Parameter gesetzt sind
+        self.observers
+            .set_tree_params(self.distance_metric, self.minkowski_p);
+        for (idx, observer_data) in observers_data.iter().enumerate() {
+            let observer = Observer {
+                data: observer_data.clone(),
+                observations: 0.0,
+                time: 0.0,
+                age: data.len() as f64,
+                index: idx,
+                label: None,
+                cluster_observations: Vec::new(),
+            };
+            self.observers.insert(observer);
+        }
+
+        // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
+
+        // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
+        for data_point in data {
+            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
+            let (neighbors, _) = self
+                .observers
+                .search_neighbors_unified(data_point, self.x, false);
+            let nearest_indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
+
+            // Erhöhe observations für jeden dieser Observer um 1
+            for idx in nearest_indices {
+                if let Some(observer) = self.observers.get(idx) {
+                    let current_obs = observer.observations;
+                    self.observers.update_observations(idx, current_obs + 1.0);
+                }
+            }
+        }
+
+        // Set num_active
+        self.observers
+            .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
+    }
+
+    pub(crate) fn predict_impl(&self, point: &Vec<f64>) -> (f64, Vec<usize>) {
+        if self.observers.is_empty() {
+            panic!("No observers found during prediction!");
+        }
+
+        // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
+        let (_all_neighbors, active_neighbors) = self.observers.search_neighbors_unified(point, self.x, true);
+        let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
+
+        if distances.is_empty() {
+            panic!("No active observers found during prediction!");
+        }
+
+        let median = compute_median(&distances);
+
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+
+        (median, nearest_active_indices)
+    }
+
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)
     pub(crate) fn replace_observer(&mut self, old_index: usize, new_observer: Observer) -> bool {
         self.observers.replace(old_index, new_observer)

@@ -1,3 +1,8 @@
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::prelude::*;
+use rand::prelude::*;
+use rand_distr::StandardNormal;
+
 /// Distanzfunktion für SDO
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -54,5 +59,91 @@ pub fn compute_distance(
             let p = minkowski_p.unwrap_or(3.0);
             compute_minkowski_distance(a, b, p)
         }
+    }
+}
+
+/// Converts a numpy array with one row to a Vec<f64>
+/// Returns: Vector of point coordinates
+pub fn point_to_vec(point: PyReadonlyArray2<f64>) -> Vec<f64> {
+    let point_slice = point.as_array();
+
+    // Check if point has exactly one row
+    if point_slice.nrows() != 1 {
+        panic!("Point must be a 1D array or 2D array with exactly one row");
+    }
+
+    // Use row(0) for better performance
+    point_slice.row(0).to_vec()
+}
+
+/// Converts a 2D numpy array to a Vec<Vec<f64>> (matrix)
+/// Returns: Vector of rows, each row is a Vec<f64>
+pub fn data_to_matrix(data: PyReadonlyArray2<f64>) -> Vec<Vec<f64>> {
+    let data_slice = data.as_array();
+    let rows = data_slice.nrows();
+
+    // More efficient allocation
+    let mut matrix = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let row: Vec<f64> = data_slice.row(i).to_vec();
+        matrix.push(row);
+    }
+
+    matrix
+}
+
+pub fn time_to_f64(
+    time: Option<PyReadonlyArray1<f64>>,
+    use_explicit_time: bool,
+    fallback_time: usize,
+) -> Result<f64, PyErr> {
+    match (use_explicit_time, time) {
+        // Case 1: Time required but not provided
+        (true, None) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Zeit-Parameter erforderlich (Modell wurde mit Zeit initialisiert)",
+        )),
+        // Case 2: Time provided, validate and extract
+        (_, Some(time_array)) => {
+            let time_slice = time_array.as_array();
+            if time_slice.len() != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Zeit muss ein 1D-Array mit einem Wert sein",
+                ));
+            }
+            Ok(time_slice[[0]])
+        }
+        // Case 3: Time not required and not provided → use fallback
+        (false, None) => Ok(fallback_time as f64),
+    }
+}
+
+/// Converts 1D time array to Vec<f64>
+pub fn times_to_vec(times: PyReadonlyArray1<f64>) -> Vec<f64> {
+    times.as_array().to_vec()
+}
+
+/// Generates a random matrix with normally distributed values using rand_distr
+pub fn sample_random_matrix_distr(dimension: usize, sample_size: usize) -> Vec<Vec<f64>> {
+    let mut rng = thread_rng();
+    let normal = StandardNormal;
+
+    let mut random_matrix: Vec<Vec<f64>> = Vec::with_capacity(sample_size);
+
+    for _ in 0..sample_size {
+        let point: Vec<f64> = (0..dimension).map(|_| rng.sample(normal)).collect();
+        random_matrix.push(point);
+    }
+
+    random_matrix
+}
+
+pub fn compute_median(values: &Vec<f64>) -> f64 {
+    let mut sorted_values = values.clone();
+    sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let len = sorted_values.len();
+    if len % 2 == 0 {
+        (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
+    } else {
+        sorted_values[len / 2]
     }
 }
