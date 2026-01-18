@@ -7,7 +7,7 @@ use std::f64;
 use crate::obs::Observer;
 use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
-use crate::utils::{data_to_matrix, point_to_vec, compute_median};
+use crate::utils::{compute_median, data_to_matrix, point_to_vec};
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
@@ -175,7 +175,8 @@ impl SDO {
         }
 
         // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
-        let (_all_neighbors, active_neighbors) = self.observers.search_neighbors_unified(point, self.x, true);
+        let (_all_neighbors, active_neighbors) =
+            self.observers.search_neighbors_unified(point, self.x, true);
         let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
 
         if distances.is_empty() {

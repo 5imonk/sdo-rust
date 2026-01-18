@@ -444,6 +444,11 @@ impl ObserverSet {
         self.observers_by_index.is_empty()
     }
 
+    /// Get number of active observers - O(1)
+    pub fn get_num_active(&self) -> usize {
+        self.num_active
+    }
+
     /// Get iterator over all observers (unsorted)
     #[allow(dead_code)] // Für zukünftige Verwendung
     pub fn iter(&self) -> impl Iterator<Item = &Observer> {

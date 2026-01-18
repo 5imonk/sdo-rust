@@ -1,7 +1,7 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use std::collections::{HashSet};
+use pyo3::prelude::*;
+use std::collections::HashSet;
 
 use crate::sdostream_impl::SDOstream;
 use crate::utils::{point_to_vec, time_to_f64};
@@ -44,7 +44,7 @@ impl SDOstreamclust {
                 "chi_prop must be between 0.0 and 1.0",
             ));
         }
-        
+
         if zeta < 0.0 || zeta > 1.0 {
             return Err(PyErr::new::<PyValueError, _>(
                 "zeta must be between 0.0 and 1.0",
@@ -77,7 +77,6 @@ impl SDOstreamclust {
         point: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<(i32, f64)> {
-        
         // Extract point vector
         let point_vec = point_to_vec(point);
 
@@ -96,7 +95,6 @@ impl SDOstreamclust {
 
     /// Berechnet das Cluster-Label für einen Datenpunkt (Gleichung 3.4)
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
-
         let point_vec = point_to_vec(point);
 
         let (predicted_label, outlier_score) = self.predict_impl(&point_vec);
@@ -120,13 +118,13 @@ impl SDOstreamclust {
             self.min_cluster_size,
             true, // read-only mode
         );
-        
+
         // Convert to Vec<Vec<usize>>
         let clusters: Vec<Vec<usize>> = cluster_map
             .into_values()
             .map(|set| set.into_iter().collect())
             .collect();
-        
+
         Ok(clusters)
     }
 
@@ -134,6 +132,58 @@ impl SDOstreamclust {
     #[getter]
     pub fn data_points_processed(&self) -> usize {
         self.sdostream.get_data_points_processed()
+    }
+
+    /// Gibt Observer-Informationen für einen bestimmten Index zurück
+    #[pyo3(signature = (index))]
+    pub fn get_observer_info(
+        &self,
+        _py: Python,
+        index: usize,
+    ) -> PyResult<(Vec<f64>, f64, f64, f64, bool, Option<i32>, Vec<f64>)> {
+        if let Some(observer) = self.sdostream.get_sdo().observers.get(index) {
+            let is_active = self.sdostream.get_sdo().observers.is_active(index);
+            Ok((
+                observer.data.clone(),
+                observer.observations,
+                observer.age,
+                observer.time,
+                is_active,
+                observer.label,
+                observer.cluster_observations.clone(),
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Observer with index {} not found",
+                index
+            )))
+        }
+    }
+
+    /// Gibt alle Observer-Cluster-Labels zurück
+    #[getter]
+    pub fn get_cluster_labels(&self, _py: Python) -> PyResult<Vec<Option<i32>>> {
+        let labels: Vec<Option<i32>> = self
+            .sdostream
+            .get_sdo()
+            .observers
+            .iter_observers(false)
+            .map(|obs| obs.label)
+            .collect();
+        Ok(labels)
+    }
+
+    /// Gibt alle Cluster-Beobachtungen zurück
+    #[getter]
+    pub fn get_cluster_observations(&self, _py: Python) -> PyResult<Vec<Vec<f64>>> {
+        let cluster_obs: Vec<Vec<f64>> = self
+            .sdostream
+            .get_sdo()
+            .observers
+            .iter_observers(false)
+            .map(|obs| obs.cluster_observations.clone())
+            .collect();
+        Ok(cluster_obs)
     }
 }
 
@@ -152,7 +202,7 @@ impl SDOstreamclust {
             self.min_cluster_size,
             false,
         );
-        
+
         // Konvertiere HashMap zu Vec<HashSet<usize>> für label_clusters
         let clusters: Vec<HashSet<usize>> = cluster_map.into_values().collect();
 
@@ -178,7 +228,7 @@ impl SDOstreamclust {
 
     pub fn predict_impl(&self, point: &Vec<f64>) -> (i32, f64) {
         let (median, nearest_active_indices) = self.sdostream.predict_impl(point);
-        
+
         let predicted_label = self.compute_label(&nearest_active_indices);
 
         (predicted_label, median)
@@ -193,10 +243,10 @@ impl SDOstreamclust {
 
         // Berechne normalisierte Cluster-Scores der x-nächsten Observer
         let label_scores = self
-                .sdostream
-                .get_sdo()
-                .observers
-                .get_normalized_cluster_scores(&indices);        
+            .sdostream
+            .get_sdo()
+            .observers
+            .get_normalized_cluster_scores(&indices);
 
         // Finde Label mit maximalem Score
         let predicted_label = label_scores

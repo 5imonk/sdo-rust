@@ -1,12 +1,14 @@
+use core::panic;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::{thread_rng, Rng};
-use core::panic;
 use std::f64;
 
 use crate::obs::Observer;
 use crate::sdo_impl::SDO;
-use crate::utils::{data_to_matrix, point_to_vec, sample_random_matrix_distr, time_to_f64, compute_median};
+use crate::utils::{
+    compute_median, data_to_matrix, point_to_vec, sample_random_matrix_distr, time_to_f64,
+};
 
 impl SDOstream {
     /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
@@ -154,6 +156,69 @@ impl SDOstream {
     pub fn t_sampling(&self) -> f64 {
         self.t_sampling
     }
+
+    /// Gibt Anzahl der Observer zurück
+    #[getter]
+    pub fn observer_count(&self) -> usize {
+        self.sdo.observers.len()
+    }
+
+    /// Gibt Anzahl der aktiven Observer zurück
+    #[getter]
+    pub fn num_active(&self) -> usize {
+        self.sdo.observers.get_num_active()
+    }
+
+    /// Gibt Anzahl der verarbeiteten Datenpunkte zurück
+    #[getter]
+    pub fn data_points_processed(&self) -> usize {
+        self.data_points_processed
+    }
+
+    /// Gibt Observer-Informationen für einen bestimmten Index zurück
+    #[pyo3(signature = (index))]
+    pub fn get_observer_info(
+        &self,
+        _py: Python,
+        index: usize,
+    ) -> PyResult<(f64, f64, f64, bool, Option<i32>)> {
+        if let Some(observer) = self.sdo.observers.get(index) {
+            let is_active = self.sdo.observers.is_active(index);
+            Ok((
+                observer.observations,
+                observer.age,
+                observer.time,
+                is_active,
+                observer.label,
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Observer with index {} not found",
+                index
+            )))
+        }
+    }
+
+    /// Gibt alle Observer-Informationen zurück
+    #[getter]
+    pub fn get_all_observer_info(
+        &self,
+        _py: Python,
+    ) -> PyResult<Vec<(Vec<f64>, f64, f64, f64, bool, Option<i32>)>> {
+        let mut result = Vec::new();
+        for observer in self.sdo.observers.iter_observers(false) {
+            let is_active = self.sdo.observers.is_active(observer.index);
+            result.push((
+                observer.data.clone(),
+                observer.observations,
+                observer.age,
+                observer.time,
+                is_active,
+                observer.label,
+            ));
+        }
+        Ok(result)
+    }
 }
 
 impl SDOstream {
@@ -230,7 +295,8 @@ impl SDOstream {
             .search_neighbors_unified(&point, x, false);
         let nearest_observer_indices: Vec<usize> = all_neighbors.iter().map(|n| n.index).collect();
 
-        let nearest_active_distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
+        let nearest_active_distances: Vec<f64> =
+            active_neighbors.iter().map(|n| n.distance).collect();
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
         let median = if !nearest_active_distances.is_empty() {
             compute_median(&nearest_active_distances)
@@ -283,7 +349,6 @@ impl SDOstream {
     pub(crate) fn get_sdo_mut(&mut self) -> &mut SDO {
         &mut self.sdo
     }
-
 }
 
 impl SDOstream {
@@ -293,8 +358,10 @@ impl SDOstream {
     fn sample_impl(&mut self, point: &[f64], time: f64) -> Option<usize> {
         let elapsed = time - self.last_replacement_time;
 
-        if elapsed <= 0.0 {
-            panic!("Ungültige Zeit: current time muss größer als last_replacement_time sein");
+        if elapsed < 0.0 {
+            panic!(
+                "Ungültige Zeit: current time muss größer oder gleich last_replacement_time sein"
+            );
         }
 
         // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / t_sampling
@@ -323,7 +390,7 @@ impl SDOstream {
 
         // Speichere verbleibende Ersetzungen für nächste Aufrufe
         self.pending_replacements = total_replacements - 1;
-        
+
         // Wenn total_replacements == 0: last_replacement_time bleibt unverändert
         // (Zeit wird beim nächsten Aufruf akkumuliert)
 

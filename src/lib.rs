@@ -1,15 +1,17 @@
+#[cfg(test)]
+mod mahalanobis_tests;
 pub mod obs;
 pub mod obset;
 mod obset_clust;
 mod obset_strcl;
 mod obset_stream;
-mod sdo_impl;
-mod sdoclust_impl;
-mod sdostrcl_impl;
-mod sdostream_impl;
+pub mod sdo_impl;
+pub mod sdoclust_impl;
+pub mod sdostrcl_impl;
+pub mod sdostream_impl;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod utils;
-#[cfg(test)]
-mod mahalanobis_tests;
 
 use pyo3::prelude::*;
 

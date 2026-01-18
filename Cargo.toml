@@ -3,6 +3,10 @@ name = "sdo"
 version = "0.1.0"
 edition = "2021" # Rust editions define language features and idioms; "2021" is current standard, adding quality-of-life improvements, better module system, and more robust closure capture/inference than earlier editions.
 
+[features]
+default = []
+testing = []
+
 [lib]
 name = "sdo"
 crate-type = ["cdylib", "rlib"]
