@@ -2,6 +2,7 @@ use core::panic;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::{thread_rng, Rng};
+use std::collections::HashMap;
 use std::f64;
 
 use crate::obs::Observer;
@@ -189,7 +190,7 @@ impl SDOstream {
                 observer.age,
                 observer.time,
                 is_active,
-                observer.label,
+                observer.get_label().map(|l| l as i32),
             ))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
@@ -214,7 +215,7 @@ impl SDOstream {
                 observer.age,
                 observer.time,
                 is_active,
-                observer.label,
+                observer.get_label().map(|l| l as i32),
             ));
         }
         Ok(result)
@@ -266,8 +267,8 @@ impl SDOstream {
                 time: time,
                 age: 1.0,
                 index: idx,
-                label: None,
-                cluster_observations: Vec::new(),
+                local_threshold: 0.0,
+                label_observations: HashMap::new(),
             };
             self.sdo.observers.insert(observer);
         }
@@ -280,6 +281,7 @@ impl SDOstream {
         // Initialisiere Lazy Replacement: Startzeit setzen
         self.last_replacement_time = time;
         self.pending_replacements = 0; // Keine ausstehenden Ersetzungen bei Initialisierung
+        self.data_points_processed = data_points.len();
 
         Ok(())
     }
@@ -452,12 +454,27 @@ impl SDOstream {
             time: time,        // Setze time auf aktuelle Zeit
             age: 1.0,          // Neuer Observer startet mit Hω = 1
             index: new_index as usize,
-            label: None,
-            cluster_observations: Vec::new(),
+            local_threshold: 0.0,
+            label_observations: HashMap::new(),
         };
 
         // Verwende SDO's replace_observer Methode - O(log n)
-        self.sdo.replace_observer(replace_idx, new_observer);
+        // replace() sollte immer erfolgreich sein, wenn remove() erfolgreich war
+        // Falls nicht, füge den neuen Observer trotzdem hinzu
+        let new_observer_clone = Observer {
+            data: new_observer.data.clone(),
+            observations: new_observer.observations,
+            time: new_observer.time,
+            age: new_observer.age,
+            index: new_observer.index,
+            local_threshold: new_observer.local_threshold,
+            label_observations: new_observer.label_observations.clone(),
+        };
+        let success = self.sdo.replace_observer(replace_idx, new_observer);
+        if !success {
+            // Fallback: Füge den neuen Observer hinzu, auch wenn replace fehlgeschlagen ist
+            self.sdo.observers.insert(new_observer_clone);
+        }
 
         Some(new_index)
     }

@@ -39,15 +39,8 @@ pub struct ObserverSet {
     // Key: observer_index -> OrderedDistanceList
     // Wird nur aktualisiert wenn clustering aktiv ist (lazy initialization)
     pub(crate) distance_lists: HashMap<usize, OrderedDistanceList>,
-
-    // Letzte Zeit für Cluster-Beobachtungs-Fading (für SDOstreamclust)
-    pub(crate) last_cluster_time: f64,
-
-    // Cache für lokale Thresholds zur Vermeidung wiederholter Berechnungen
-    // Key: (observer_index, chi) -> threshold
-    // Nur gültig wenn sich die Observer-Struktur nicht geändert hat
-    pub(crate) local_threshold_cache: HashMap<(usize, usize), f64>,
-    pub(crate) cache_valid: bool,
+    pub(crate) global_threshold: f64,
+    pub(crate) last_label: usize,
 }
 
 impl ObserverSet {
@@ -61,9 +54,8 @@ impl ObserverSet {
             num_active: 0,
             last_active_observer: None,
             distance_lists: HashMap::new(),
-            last_cluster_time: 0.0,
-            local_threshold_cache: HashMap::new(),
-            cache_valid: true,
+            global_threshold: f64::INFINITY,
+            last_label: 0,
         }
     }
 
@@ -234,6 +226,11 @@ impl ObserverSet {
     pub fn insert(&mut self, observer: Observer) {
         let index = observer.index;
 
+        // Wenn ein Observer mit diesem Index bereits existiert, raise an error
+        if self.observers_by_index.contains_key(&index) {
+            panic!("Observer with index {} already exists", index);
+        }
+
         // Create keys for secondary indices (no cloning of observer data)
         let obs_key = ObservationKey {
             observations: OrderedFloat(observer.observations),
@@ -261,9 +258,6 @@ impl ObserverSet {
 
         // Update distance lists für alle Observer
         self.update_distance_lists_on_insert(index, &data);
-
-        // Invalidiere Cache bei Strukturänderungen
-        self.invalidate_threshold_cache();
     }
 
     /// Get observer by index - O(1)
@@ -314,8 +308,8 @@ impl ObserverSet {
                     time: observer_arc.time,
                     age: new_age,
                     index: observer_arc.index,
-                    label: observer_arc.label,
-                    cluster_observations: observer_arc.cluster_observations.clone(),
+                    local_threshold: observer_arc.local_threshold,
+                    label_observations: observer_arc.label_observations.clone(),
                 })
             }
         };
@@ -386,37 +380,41 @@ impl ObserverSet {
 
     /// Remove an observer by index - O(log n)
     pub fn remove(&mut self, index: usize) -> Option<Observer> {
-        // Get observer Arc to remove (need values for keys)
-        let observer_arc = self.observers_by_index.get(&index)?;
+        // Wenn ein Observer mit diesem Index nicht existiert, raise an error
+        if !self.observers_by_index.contains_key(&index) {
+            panic!("Observer with index {} does not exist", index);
+        }
 
-        // Create keys to remove from secondary indices
-        let obs_key = ObservationKey {
-            observations: crate::obs::OrderedFloat(observer_arc.observations),
-            index,
-        };
-        let normalized_score = if observer_arc.age > 0.0 {
-            observer_arc.observations / observer_arc.age
-        } else {
-            f64::INFINITY
-        };
-        let score_key = NormalizedScoreKey {
-            score: crate::obs::OrderedFloat(normalized_score),
-            index,
-        };
+        // Entferne ALLE Einträge mit diesem index aus sekundären Indizes
+        // (nicht nur den mit aktuellen observations, da sich diese geändert haben könnten)
+        let keys_to_remove_obs: Vec<ObservationKey> = self
+            .indices_by_obs
+            .keys()
+            .filter(|key| key.index == index)
+            .cloned()
+            .collect();
+        for key in keys_to_remove_obs {
+            self.indices_by_obs.remove(&key);
+        }
 
-        // Remove from all structures
+        let keys_to_remove_score: Vec<NormalizedScoreKey> = self
+            .indices_by_score
+            .keys()
+            .filter(|key| key.index == index)
+            .cloned()
+            .collect();
+        for key in keys_to_remove_score {
+            self.indices_by_score.remove(&key);
+        }
+
+        // Remove from primary structure
         let observer_arc = self.observers_by_index.remove(&index)?;
-        self.indices_by_obs.remove(&obs_key);
-        self.indices_by_score.remove(&score_key);
 
         // Update last_active_observer cache, da sich die Observer-Liste geändert hat
         self.update_last_active_observer();
 
         // Update distance lists: Entferne diesen Observer aus allen Distanzlisten
         self.update_distance_lists_on_remove(index);
-
-        // Invalidiere Cache bei Strukturänderungen
-        self.invalidate_threshold_cache();
 
         // Return owned Observer (dereference Arc)
         Some((*observer_arc).clone())
@@ -475,46 +473,19 @@ impl ObserverSet {
         }
     }
 
-    /// Update observer label - O(1)
-    pub fn update_label(&mut self, index: usize, label: Option<i32>) -> bool {
-        if let Some(arc) = self.observers_by_index.get_mut(&index) {
-            if let Some(mut_observer) = Arc::get_mut(arc) {
-                // Exclusive access - update in place (no clone!)
-                mut_observer.label = label;
-                true
-            } else {
-                // Shared - create new Arc with updated label
-                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
-                let updated_observer = Arc::new(Observer {
-                    data: observer_arc.data.clone(),
-                    observations: observer_arc.observations,
-                    time: observer_arc.time,
-                    age: observer_arc.age,
-                    index: observer_arc.index,
-                    label,
-                    cluster_observations: observer_arc.cluster_observations.clone(),
-                });
-                self.observers_by_index.insert(index, updated_observer);
-                true
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Update cluster observations vector - O(1)
-    pub fn update_cluster_observations(
+    /// Update observer label observations HashMap - O(1)
+    pub fn update_label_observations(
         &mut self,
         index: usize,
-        cluster_observations: Vec<f64>,
+        label_observations: HashMap<usize, f64>,
     ) -> bool {
         if let Some(arc) = self.observers_by_index.get_mut(&index) {
             if let Some(mut_observer) = Arc::get_mut(arc) {
                 // Exclusive access - update in place (no clone!)
-                mut_observer.cluster_observations = cluster_observations;
+                mut_observer.label_observations = label_observations;
                 true
             } else {
-                // Shared - create new Arc with updated cluster_observations
+                // Shared - create new Arc with updated label_observations
                 let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
                 let updated_observer = Arc::new(Observer {
                     data: observer_arc.data.clone(),
@@ -522,8 +493,8 @@ impl ObserverSet {
                     time: observer_arc.time,
                     age: observer_arc.age,
                     index: observer_arc.index,
-                    label: observer_arc.label,
-                    cluster_observations,
+                    local_threshold: observer_arc.local_threshold,
+                    label_observations,
                 });
                 self.observers_by_index.insert(index, updated_observer);
                 true
@@ -533,10 +504,31 @@ impl ObserverSet {
         }
     }
 
-    /// Invalidiere den lokalen Threshold-Cache
-    pub(crate) fn invalidate_threshold_cache(&mut self) {
-        self.local_threshold_cache.clear();
-        self.cache_valid = false;
+    /// Update observer local threshold - O(1)
+    pub fn update_local_threshold(&mut self, index: usize, local_threshold: f64) -> bool {
+        if let Some(arc) = self.observers_by_index.get_mut(&index) {
+            if let Some(mut_observer) = Arc::get_mut(arc) {
+                // Exclusive access - update in place (no clone!)
+                mut_observer.local_threshold = local_threshold;
+                true
+            } else {
+                // Shared - create new Arc with updated local_threshold
+                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
+                let updated_observer = Arc::new(Observer {
+                    data: observer_arc.data.clone(),
+                    observations: observer_arc.observations,
+                    time: observer_arc.time,
+                    age: observer_arc.age,
+                    index: observer_arc.index,
+                    local_threshold,
+                    label_observations: observer_arc.label_observations.clone(),
+                });
+                self.observers_by_index.insert(index, updated_observer);
+                true
+            }
+        } else {
+            false
+        }
     }
 
     /// Find k nearest observer distances

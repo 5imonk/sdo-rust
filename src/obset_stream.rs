@@ -105,8 +105,8 @@ impl ObserverSet {
                     time: new_time,
                     age: new_age,
                     index: observer_arc.index,
-                    label: observer_arc.label,
-                    cluster_observations: observer_arc.cluster_observations.clone(),
+                    local_threshold: observer_arc.local_threshold,
+                    label_observations: observer_arc.label_observations.clone(),
                 })
             }
         };

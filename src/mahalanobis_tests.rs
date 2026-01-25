@@ -5,6 +5,7 @@ mod tests {
     use super::*;
     use crate::obs::Observer;
     use crate::utils::DistanceMetric;
+    use std::collections::HashMap;
 
     fn create_test_observers() -> (ObserverSet, Vec<usize>) {
         let mut obs_set = ObserverSet::new();
@@ -18,8 +19,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 0,
-                label: Some(0),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(0, 1.0)]),
             },
             Observer {
                 data: vec![0.1, 0.1],
@@ -27,8 +28,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 1,
-                label: Some(0),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(0, 1.0)]),
             },
             Observer {
                 data: vec![-0.1, 0.1],
@@ -36,8 +37,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 2,
-                label: Some(0),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(0, 1.0)]),
             },
             Observer {
                 data: vec![0.1, -0.1],
@@ -45,8 +46,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 3,
-                label: Some(0),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(0, 1.0)]),
             },
         ];
 
@@ -58,8 +59,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 4,
-                label: Some(1),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(1, 1.0)]),
             },
             Observer {
                 data: vec![3.0, 3.0],
@@ -67,8 +68,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 5,
-                label: Some(1),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(1, 1.0)]),
             },
             Observer {
                 data: vec![-3.1, -2.9],
@@ -76,8 +77,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 6,
-                label: Some(1),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(1, 1.0)]),
             },
             Observer {
                 data: vec![3.1, 2.9],
@@ -85,8 +86,8 @@ mod tests {
                 time: 1.0,
                 age: 1.0,
                 index: 7,
-                label: Some(1),
-                cluster_observations: vec![],
+                local_threshold: 0.0,
+                label_observations: HashMap::from([(1, 1.0)]),
             },
         ];
 
@@ -145,8 +146,8 @@ mod tests {
             time: 1.0,
             age: 1.0,
             index: 0,
-            label: Some(0),
-            cluster_observations: vec![],
+            local_threshold: 0.0,
+            label_observations: HashMap::from([(0, 1.0)]),
         };
         obs_set.insert(single_obs);
 

@@ -2,6 +2,7 @@ use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use std::collections::HashMap;
 use std::f64;
 
 use crate::obs::Observer;
@@ -139,8 +140,8 @@ impl SDO {
                 time: 0.0,
                 age: data.len() as f64,
                 index: idx,
-                label: None,
-                cluster_observations: Vec::new(),
+                local_threshold: 0.0,
+                label_observations: HashMap::new(),
             };
             self.observers.insert(observer);
         }

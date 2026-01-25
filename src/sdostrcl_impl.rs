@@ -1,7 +1,6 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use std::collections::HashSet;
 
 use crate::sdostream_impl::SDOstream;
 use crate::utils::{point_to_vec, time_to_f64};
@@ -39,13 +38,13 @@ impl SDOstreamclust {
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Self> {
         // Validate parameters
-        if chi_prop < 0.0 || chi_prop > 1.0 {
+        if !(0.0..=1.0).contains(&chi_prop) {
             return Err(PyErr::new::<PyValueError, _>(
                 "chi_prop must be between 0.0 and 1.0",
             ));
         }
 
-        if zeta < 0.0 || zeta > 1.0 {
+        if !(0.0..=1.0).contains(&zeta) {
             return Err(PyErr::new::<PyValueError, _>(
                 "zeta must be between 0.0 and 1.0",
             ));
@@ -101,125 +100,23 @@ impl SDOstreamclust {
 
         Ok((predicted_label, outlier_score))
     }
-
-    /// Gibt x zurück (Anzahl der nächsten Nachbarn)
-    #[getter]
-    pub fn x(&self) -> usize {
-        self.sdostream.x()
-    }
-
-    /// Gibt aktuelle Cluster-Informationen zurück
-    #[getter]
-    pub fn get_clusters(&mut self) -> PyResult<Vec<Vec<usize>>> {
-        // Berechne aktuelle Cluster
-        let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
-            self.chi,
-            self.zeta,
-            self.min_cluster_size,
-            true, // read-only mode
-        );
-
-        // Convert to Vec<Vec<usize>>
-        let clusters: Vec<Vec<usize>> = cluster_map
-            .into_values()
-            .map(|set| set.into_iter().collect())
-            .collect();
-
-        Ok(clusters)
-    }
-
-    /// Gibt die Anzahl der verarbeiteten Datenpunkte zurück
-    #[getter]
-    pub fn data_points_processed(&self) -> usize {
-        self.sdostream.get_data_points_processed()
-    }
-
-    /// Gibt Observer-Informationen für einen bestimmten Index zurück
-    #[pyo3(signature = (index))]
-    pub fn get_observer_info(
-        &self,
-        _py: Python,
-        index: usize,
-    ) -> PyResult<(Vec<f64>, f64, f64, f64, bool, Option<i32>, Vec<f64>)> {
-        if let Some(observer) = self.sdostream.get_sdo().observers.get(index) {
-            let is_active = self.sdostream.get_sdo().observers.is_active(index);
-            Ok((
-                observer.data.clone(),
-                observer.observations,
-                observer.age,
-                observer.time,
-                is_active,
-                observer.label,
-                observer.cluster_observations.clone(),
-            ))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                "Observer with index {} not found",
-                index
-            )))
-        }
-    }
-
-    /// Gibt alle Observer-Cluster-Labels zurück
-    #[getter]
-    pub fn get_cluster_labels(&self, _py: Python) -> PyResult<Vec<Option<i32>>> {
-        let labels: Vec<Option<i32>> = self
-            .sdostream
-            .get_sdo()
-            .observers
-            .iter_observers(false)
-            .map(|obs| obs.label)
-            .collect();
-        Ok(labels)
-    }
-
-    /// Gibt alle Cluster-Beobachtungen zurück
-    #[getter]
-    pub fn get_cluster_observations(&self, _py: Python) -> PyResult<Vec<Vec<f64>>> {
-        let cluster_obs: Vec<Vec<f64>> = self
-            .sdostream
-            .get_sdo()
-            .observers
-            .iter_observers(false)
-            .map(|obs| obs.cluster_observations.clone())
-            .collect();
-        Ok(cluster_obs)
-    }
 }
 
 impl SDOstreamclust {
     /// Interner Zugriff auf mutable SDOstream
     pub fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
         // Verwende SDOstream für Modell-Erstellung (Sample, Observe, Clean)
-        let (median, nearest_active_indices) = self.sdostream.learn_impl(&point, time);
+        let (median, nearest_active_indices) = self.sdostream.learn_impl(point, time);
 
-        // Schritt 2: Cluster (Algorithmus 3.3)
-        // Get mutable reference to observers
-        // This requires that get_sdo_mut() returns &mut to the SDO object
-        let cluster_map = self.sdostream.get_sdo_mut().observers.learn_cluster(
+        // Führe vollständiges Clustering durch (inkl. Thresholds, Connected Components, Label-Zuweisung, Fading)
+        let fading = self.sdostream.get_fading();
+        let _cluster_map = self.sdostream.get_sdo_mut().observers.learn_clustering(
             self.chi,
             self.zeta,
             self.min_cluster_size,
-            false,
+            Some(fading), // Fading für Streaming
+            Some(time),   // Aktuelle Zeit
         );
-
-        // Konvertiere HashMap zu Vec<HashSet<usize>> für label_clusters
-        let clusters: Vec<HashSet<usize>> = cluster_map.into_values().collect();
-
-        // Schritt 3: Label (Algorithmus 3.5)
-        let cluster_labels = self.sdostream.get_sdo().observers.label_clusters(&clusters);
-
-        // Schritt 4 & 5: Update Cluster-Beobachtungen
-        let fading = self.sdostream.get_fading();
-        self.sdostream
-            .get_sdo_mut()
-            .observers
-            .update_cluster_observations_with_fading_and_clusters(
-                fading,
-                time,
-                &clusters,
-                &cluster_labels,
-            );
 
         let predicted_label = self.compute_label(&nearest_active_indices);
 
@@ -236,7 +133,7 @@ impl SDOstreamclust {
 }
 
 impl SDOstreamclust {
-    pub fn compute_label(&self, indices: &Vec<usize>) -> i32 {
+    pub fn compute_label(&self, indices: &[usize]) -> i32 {
         if indices.is_empty() {
             panic!("No active observers found during prediction!");
         }
@@ -246,13 +143,13 @@ impl SDOstreamclust {
             .sdostream
             .get_sdo()
             .observers
-            .get_normalized_cluster_scores(&indices);
+            .get_normalized_cluster_scores(indices);
 
-        // Finde Label mit maximalem Score
+        // Finde Label mit maximalem Score (konvertiere zu i32 für Python-API)
         let predicted_label = label_scores
             .iter()
             .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(&label, _)| label)
+            .map(|(&label, _)| label as i32)
             .unwrap_or(-1); // -1 wenn keine Beobachtungen
         predicted_label
     }

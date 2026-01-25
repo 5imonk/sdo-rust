@@ -4,205 +4,257 @@ use crate::obset::ObserverSet;
 
 /// Clustering-Erweiterungen für ObserverSet
 impl ObserverSet {
-    /// Führt Clustering auf den aktiven Observers durch
-    /// chi: Anzahl der nächsten Observer für lokale Thresholds
-    /// zeta: Mixing-Parameter für globale/lokale Thresholds
-    /// min_cluster_size: minimale Clustergröße
-    /// write_labels: Wenn true, werden Labels in obs.label geschrieben; sonst nur temporär für interne Verwendung
-    /// Gibt die Cluster-Map zurück: HashMap<label, HashSet<observer_indices>>
-    /// Verwendet distance_metric und minkowski_p aus ObserverSet
-    pub fn learn_cluster(
-        &mut self,
-        chi: usize,
+    /// DFS-Helper für Connected Components
+    /// Findet alle Observer in derselben Connected Component wie start_index
+    fn dfs(
+        &self,
+        start_index: usize,
         zeta: f64,
-        min_cluster_size: usize,
-        write_labels: bool,
-    ) -> HashMap<i32, HashSet<usize>> {
-        // Hole aktive Observer
-        let active_observers: Vec<Vec<f64>> = self
-            .iter_observers(true)
-            .map(|obs| obs.data.clone())
-            .collect();
+        global_threshold: f64,
+        visited_indices: &mut HashSet<usize>,
+    ) -> HashSet<usize> {
+        let mut connected_component = HashSet::new();
+        let mut stack = vec![start_index];
 
-        let n = active_observers.len();
-        if n == 0 {
-            return HashMap::new();
-        }
+        visited_indices.insert(start_index);
+        connected_component.insert(start_index);
 
-        // Hole aktive Observer-Indizes
-        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+        while let Some(current_index) = stack.pop() {
+            // Hole h_omega für den aktuellen Observer
+            let h_omega_current = self.get(current_index).unwrap().local_threshold;
+            let final_threshold_current = zeta * h_omega_current + (1.0 - zeta) * global_threshold;
 
-        if active_indices.len() != n {
-            return HashMap::new(); // Mismatch
-        }
+            // Sammle potenzielle Nachbarn aus der Distanzliste
+            if let Some(distance_list) = self.distance_lists.get(&current_index) {
+                let end_pos = distance_list.find_threshold_position(final_threshold_current);
 
-        // Schritt 1: Berechne lokale Cutoff-Thresholds h_ω
-        // Verwende gecachte Distanzlisten für effiziente Berechnung
-        if self.distance_lists.is_empty() {
-            // Wenn keine Distanzlisten vorhanden, baue sie neu auf
-            self.rebuild_distance_lists();
-        }
+                // Wir müssen über alle Nachbarn iterieren, die näher als final_threshold_current sind
+                let neighbors: Vec<(usize, f64)> = distance_list.distances[..end_pos].to_vec();
 
-        // Sammle lokale Thresholds für globale Berechnung mit Cache
-        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
-
-        // Validiere Cache vor Batch-Berechnung
-        self.validate_threshold_cache();
-
-        let local_thresholds: Vec<f64> = active_indices
-            .iter()
-            .map(|&idx| self.compute_local_threshold_cached(idx, chi))
-            .collect();
-
-        // Schritt 2: Berechne globalen Density-Threshold h
-        let global_threshold: f64 = if !local_thresholds.is_empty() {
-            local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64
-        } else {
-            f64::INFINITY
-        };
-
-        // Schritt 3: Entferne alle Labels von allen Observern
-        let all_indices: Vec<usize> = self.iter_observers(false).map(|obs| obs.index).collect();
-        let all_indices_clone = all_indices.clone();
-        for index in all_indices {
-            self.update_label(index, None);
-        }
-
-        // Schritt 4 & 5: Finde Connected Components mit DFS und weise Labels zu
-        // Iteriere über alle aktiven Observer (nach Index)
-        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
-
-        let mut current_label = 0i32;
-
-        // DFS für jeden unbesuchten aktiven Observer
-        for &start_index in &active_indices {
-            // Prüfe ob Observer bereits ein Label hat (besucht)
-            let start_observer = self.observers_by_index.get(&start_index).unwrap();
-            if start_observer.label.is_some() {
-                continue; // Bereits besucht
-            }
-
-            // Starte neue Connected Component
-            let mut stack = vec![start_index];
-            self.update_label(start_index, Some(current_label));
-
-            while let Some(current_index) = stack.pop() {
-                // Berechne finalen Threshold für den aktuellen Observer
-                let final_threshold_current =
-                    self.compute_final_threshold(current_index, zeta, chi, global_threshold);
-
-                // Sammle potenzielle Nachbarn aus der Distanzliste (nur die, die näher als final_threshold_current sind)
-                // Optimiert: Binary Search + early termination
-                let potential_neighbors: Vec<(usize, f64)> = {
-                    if let Some(distance_list) = self.distance_lists.get(&current_index) {
-                        let start_pos =
-                            distance_list.find_threshold_position(final_threshold_current);
-                        distance_list.distances[start_pos..]
-                            .iter()
-                            .filter(|(neighbor_idx, dist)| {
-                                *dist < final_threshold_current
-                                    && *neighbor_idx != current_index
-                                    && self.is_active(*neighbor_idx)
-                            })
-                            .map(|(idx, dist)| (*idx, *dist))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    }
-                };
-
-                // Verarbeite potenzielle Nachbarn
-                for (neighbor_index, dist) in potential_neighbors {
-                    // Prüfe ob Nachbar bereits besucht (hat Label)
-                    let neighbor_observer = self.observers_by_index.get(&neighbor_index).unwrap();
-                    if neighbor_observer.label.is_some() {
-                        continue; // Bereits besucht
+                for (neighbor_index, dist) in neighbors {
+                    if visited_indices.contains(&neighbor_index) || !self.is_active(neighbor_index)
+                    {
+                        continue;
                     }
 
-                    // Berechne finalen Threshold für den Nachbar
+                    // Hole h_omega für den Nachbarn
+                    let h_omega_neighbor = self.get(neighbor_index).unwrap().local_threshold;
                     let final_threshold_neighbor =
-                        self.compute_final_threshold(neighbor_index, zeta, chi, global_threshold);
+                        zeta * h_omega_neighbor + (1.0 - zeta) * global_threshold;
 
                     // Zwei Observer sind verbunden wenn d(ν,ω) < h'_ω UND d(ν,ω) < h'_ν
                     if dist < final_threshold_neighbor {
-                        self.update_label(neighbor_index, Some(current_label));
+                        visited_indices.insert(neighbor_index);
+                        connected_component.insert(neighbor_index);
                         stack.push(neighbor_index);
                     }
                 }
             }
-            current_label += 1;
         }
 
-        // Schritt 6: Entferne kleine Cluster
-        // Zähle Größe jedes Clusters
-        let mut cluster_sizes: HashMap<i32, usize> = HashMap::new();
-        for obs in self.iter_observers(true) {
-            if let Some(label) = obs.label {
-                if label >= 0 {
-                    *cluster_sizes.entry(label).or_insert(0) += 1;
-                }
+        connected_component
+    }
+
+    /// Findet alle Connected Components unter den aktiven Observern
+    pub fn find_connected_components(&mut self, zeta: f64) -> Vec<HashSet<usize>> {
+        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+        let mut connected_components = Vec::new();
+        let mut visited_indices: HashSet<usize> = HashSet::new();
+        let global_threshold = self.global_threshold;
+
+        for &start_index in &active_indices {
+            if visited_indices.contains(&start_index) {
+                continue; // Bereits besucht
+            }
+
+            let component = self.dfs(start_index, zeta, global_threshold, &mut visited_indices);
+            if !component.is_empty() {
+                connected_components.push(component);
             }
         }
 
-        // Sammle Indizes von Observers, die entfernt werden sollen
-        let mut indices_to_remove: Vec<usize> = Vec::new();
-        for obs in self.iter_observers(true) {
-            if let Some(label) = obs.label {
-                if label >= 0 {
-                    if let Some(&size) = cluster_sizes.get(&label) {
-                        if size < min_cluster_size {
-                            indices_to_remove.push(obs.index);
-                        }
+        connected_components
+    }
+
+    /// Entfernt kleine Cluster aus der Liste
+    fn remove_small_clusters(
+        connected_components: &mut Vec<HashSet<usize>>,
+        min_cluster_size: usize,
+    ) {
+        connected_components.retain(|component| component.len() >= min_cluster_size);
+    }
+
+    /// Findet den Cluster mit dem maximalen Score basierend auf historischen Label-Observations
+    /// Berücksichtigt nur noch nicht verarbeitete Cluster und noch nicht verwendete Labels
+    /// Gibt Option<(cluster_index, max_score, candidate_label)> zurück
+    fn get_max_cluster_score(
+        &self,
+        connected_components: &[HashSet<usize>],
+        used_labels: &HashSet<usize>,
+        processed_connected_components: &HashSet<usize>,
+    ) -> Option<(usize, f64, usize)> {
+        connected_components
+            .iter()
+            .enumerate()
+            .filter(|(cluster_idx, _)| !processed_connected_components.contains(cluster_idx))
+            .filter_map(|(cluster_idx, cluster_set)| {
+                // Berechne normalisierte Cluster-Scores für alle Observer im Cluster
+                let label_scores = self.get_normalized_cluster_scores(
+                    &cluster_set.iter().cloned().collect::<Vec<_>>(),
+                );
+
+                // Filtere nur noch nicht verwendete Labels
+                let available_label_scores: HashMap<usize, f64> = label_scores
+                    .into_iter()
+                    .filter(|(label, _)| !used_labels.contains(label))
+                    .collect();
+
+                // Finde maximalen Score und entsprechendes Label aus verfügbaren Labels
+                let (candidate_label, max_score) = available_label_scores
+                    .iter()
+                    .max_by(|(_, &a), (_, &b)| {
+                        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(&label, &score)| (label, score))
+                    .unwrap_or((0usize, 0.0));
+
+                Some((cluster_idx, max_score, candidate_label))
+            })
+            .max_by(|(_, score_a, _), (_, score_b, _)| {
+                score_a.partial_cmp(score_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// Weist Labels zu Clustern zu basierend auf historischen Cluster-Beobachtungen (Algorithmus 3.5)
+    /// Iterative Label-Zuweisung: In jeder Iteration wird der Cluster mit maximalem Score gefunden und zugewiesen
+    /// Gibt eine HashMap zurück: cluster_index -> label (usize)
+    pub fn label_connected_components(
+        &mut self,
+        connected_components: &[HashSet<usize>],
+    ) -> HashMap<usize, usize> {
+        let mut cluster_labels: HashMap<usize, usize> = HashMap::new();
+        let mut used_labels: HashSet<usize> = HashSet::new();
+        let mut processed_connected_components: HashSet<usize> = HashSet::new();
+        let mut next_novel_label = self.last_label + 1;
+
+        // Wiederhole bis alle Cluster verarbeitet sind
+        while processed_connected_components.len() < connected_components.len() {
+            // Finde Cluster mit maximalem Score
+            if let Some((cluster_idx, score, candidate_label)) = self.get_max_cluster_score(
+                connected_components,
+                &used_labels,
+                &processed_connected_components,
+            ) {
+                // Weise Label zu basierend auf Score
+                if score == 0.0 {
+                    // Neuer Cluster (novel class) - keine historischen Beobachtungen
+                    let novel_label = next_novel_label;
+                    cluster_labels.insert(cluster_idx, novel_label);
+                    used_labels.insert(novel_label);
+                    processed_connected_components.insert(cluster_idx);
+                    next_novel_label += 1;
+                } else {
+                    // Label ist verfügbar (wurde bereits in get_max_cluster_score gefiltert)
+                    cluster_labels.insert(cluster_idx, candidate_label);
+                    used_labels.insert(candidate_label);
+                    processed_connected_components.insert(cluster_idx);
+                }
+            } else {
+                // Keine Scores mehr verfügbar - weise novel labels zu allen verbleibenden Clustern
+                for (cluster_idx, _) in connected_components.iter().enumerate() {
+                    if !processed_connected_components.contains(&cluster_idx) {
+                        let novel_label = next_novel_label;
+                        cluster_labels.insert(cluster_idx, novel_label);
+                        used_labels.insert(novel_label);
+                        processed_connected_components.insert(cluster_idx);
+                        next_novel_label += 1;
                     }
                 }
+                break;
             }
         }
 
-        // Entferne Labels von Observers in zu kleinen Clustern
-        for idx in indices_to_remove {
-            self.update_label(idx, None);
-        }
+        // Aktualisiere last_label
+        self.last_label = next_novel_label - 1;
 
-        // Baue Cluster-Map aus Labels
-        let mut cluster_map: HashMap<i32, HashSet<usize>> = HashMap::new();
-        for obs in self.iter_observers(true) {
-            if let Some(label) = obs.label {
-                if label >= 0 {
-                    cluster_map.entry(label).or_default().insert(obs.index);
+        cluster_labels
+    }
+
+    /// Führt vollständiges Clustering durch: Thresholds setzen, Connected Components finden,
+    /// Labels zuweisen und Label-Observations aktualisieren
+    /// chi: Anzahl der nächsten Observer für lokale Thresholds
+    /// zeta: Mixing-Parameter für globale/lokale Thresholds
+    /// min_cluster_size: minimale Clustergröße
+    /// fading: Optional Fading-Parameter für Streaming (f = exp(-T^-1))
+    /// current_time: Optional aktuelle Zeit für Streaming
+    /// Gibt die Cluster-Map zurück: HashMap<label, HashSet<observer_indices>>
+    pub fn learn_clustering(
+        &mut self,
+        chi: usize,
+        zeta: f64,
+        min_cluster_size: usize,
+        fading: Option<f64>,
+        current_time: Option<f64>,
+    ) {
+        // Schritt 1: Setze Thresholds für alle aktiven Observer
+        self.set_thresholds(chi);
+
+        // Schritt 2: Finde Connected Components mit Helper-Methode
+        let mut connected_components = self.find_connected_components(zeta);
+
+        // Schritt 3: Entferne kleine Cluster mit Helper-Methode
+        Self::remove_small_clusters(&mut connected_components, min_cluster_size);
+
+        // Schritt 4: Weise Labels zu basierend auf historischen Label-Observations
+        let cluster_labels = self.label_connected_components(&connected_components);
+
+        // Schritt 5: Aktualisiere Label-Observations (mit Fading falls vorhanden)
+        self.update_label_observations_with_clusters(
+            &connected_components,
+            &cluster_labels,
+            fading,
+            current_time,
+        );
+    }
+
+    /// Berechnet normalisierte Cluster-Scores für gegebene Observer-Indizes
+    /// Gibt HashMap zurück: label -> normalisierter Score
+    /// Normalisiert jede label_observations HashMap vor der Summierung
+    pub fn get_normalized_cluster_scores(&self, observer_indices: &[usize]) -> HashMap<usize, f64> {
+        let mut label_scores: HashMap<usize, f64> = HashMap::new();
+
+        for &obs_idx in observer_indices {
+            if let Some(observer) = self.get(obs_idx) {
+                let normalized_scores = observer.get_normalized_label_observations();
+                for (label, &normalized_value) in &normalized_scores {
+                    *label_scores.entry(*label).or_insert(0.0) += normalized_value;
                 }
             }
         }
 
-        // Wenn write_labels=false, entferne Labels wieder (waren nur temporär)
-        if !write_labels {
-            for index in all_indices_clone {
-                self.update_label(index, None);
-            }
-        }
-
-        cluster_map
+        label_scores
     }
 
-    /// Setze Cache als gültig (nach vollständiger Aktualisierung)
-    pub fn validate_threshold_cache(&mut self) {
-        self.cache_valid = true;
-    }
-
-    /// Berechne lokalen Threshold mit Cache-Unterstützung
-    pub fn compute_local_threshold_cached(&mut self, index: usize, chi: usize) -> f64 {
-        let cache_key = (index, chi);
-
-        // Prüfe Cache
-        if self.cache_valid {
-            if let Some(&cached_threshold) = self.local_threshold_cache.get(&cache_key) {
-                return cached_threshold;
-            }
+    /// Berechnet und setzt lokale und globale Thresholds für alle aktiven Observer
+    pub fn set_thresholds(&mut self, chi: usize) {
+        if self.distance_lists.is_empty() {
+            self.rebuild_distance_lists();
         }
 
-        // Berechne und cache
-        let threshold = self.compute_local_threshold_impl(index, chi);
-        self.local_threshold_cache.insert(cache_key, threshold);
-        threshold
+        let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+        let mut local_thresholds = Vec::with_capacity(active_indices.len());
+
+        for &idx in &active_indices {
+            let h_omega = self.compute_local_threshold_impl(idx, chi);
+            self.update_local_threshold(idx, h_omega);
+            local_thresholds.push(h_omega);
+        }
+
+        self.global_threshold = if !local_thresholds.is_empty() {
+            local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64
+        } else {
+            f64::INFINITY
+        };
     }
 
     /// Implementierung der lokalen Threshold-Berechnung
@@ -234,15 +286,84 @@ impl ObserverSet {
         f64::INFINITY
     }
 
-    /// Berechnet den finalen Threshold für einen Observer mit Mixture-Modell: h'_ω = ζ·h_ω + (1-ζ)·h
-    fn compute_final_threshold(
-        &self,
-        index: usize,
-        zeta: f64,
-        chi: usize,
-        global_threshold: f64,
-    ) -> f64 {
-        let local_threshold = self.compute_local_threshold_impl(index, chi);
-        zeta * local_threshold + (1.0 - zeta) * global_threshold
+    /// Aktualisiert Cluster-Beobachtungen Lω: Fading und/oder Cluster-Updates
+    /// Ersetzt update_cluster_observations_with_fading_and_clusters
+    /// fading: Fading-Parameter f = exp(-T^-1)
+    /// current_time: Aktuelle Zeit ti
+    /// clusters: Liste von Cluster-Sets (kann leer sein, wenn nur Fading angewendet wird)
+    /// cluster_labels: HashMap von cluster_index -> label (kann leer sein, wenn nur Fading angewendet wird)
+    /// Verwendet observer.time als letzte Update-Zeit für Fading-Berechnung
+    pub fn update_label_observations_with_clusters(
+        &mut self,
+        clusters: &Vec<HashSet<usize>>,
+        cluster_labels: &HashMap<usize, usize>,
+        fading: Option<f64>,
+        current_time: Option<f64>,
+    ) {
+        // Schritt 1: Wende Fading an (wenn fading und current_time vorhanden)
+        if let (Some(fading_val), Some(current_time_val)) = (fading, current_time) {
+            let updates: Vec<(usize, HashMap<usize, f64>)> = self
+                .iter_observers(false)
+                .map(|observer| {
+                    let observer_time_diff = current_time_val - observer.time;
+                    let fading_factor = fading_val.powf(observer_time_diff);
+
+                    // Wende Fading auf alle Cluster-Beobachtungen an
+                    let mut faded_observations = HashMap::new();
+                    for (&label, &val) in &observer.label_observations {
+                        faded_observations.insert(label, fading_factor * val);
+                    }
+
+                    (observer.index, faded_observations)
+                })
+                .collect();
+
+            // Aktualisiere jeden Observer mit gefadeten Beobachtungen
+            for (index, faded_observations) in updates {
+                // Verwende die Methode aus obset.rs
+                self.update_label_observations(index, faded_observations);
+            }
+        }
+
+        // Schritt 2: Update Lω für Observer in Clustern: Lcω ← Lcω + 1
+        if !clusters.is_empty() && !cluster_labels.is_empty() {
+            // Sammle alle Updates zuerst, um Borrow-Konflikte zu vermeiden
+            let mut label_updates: Vec<(usize, HashMap<usize, f64>)> = Vec::new();
+            let mut time_updates: Vec<(usize, f64, f64, f64)> = Vec::new();
+
+            for (cluster_idx, cluster_set) in clusters.iter().enumerate() {
+                if let Some(&label) = cluster_labels.get(&cluster_idx) {
+                    // Inkrementiere für jeden Observer im Cluster die Beobachtung für dieses Label
+                    for &obs_idx in cluster_set {
+                        if let Some(observer) = self.get(obs_idx) {
+                            let mut new_observations = observer.label_observations.clone();
+                            *new_observations.entry(label).or_insert(0.0) += 1.0;
+
+                            label_updates.push((obs_idx, new_observations));
+
+                            // Sammle Zeit-Updates wenn current_time vorhanden
+                            if let Some(current_time_val) = current_time {
+                                time_updates.push((
+                                    obs_idx,
+                                    observer.observations,
+                                    observer.age,
+                                    current_time_val,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Führe alle Updates aus
+            for (index, new_observations) in label_updates {
+                self.update_label_observations(index, new_observations);
+            }
+
+            // Führe Zeit-Updates aus (verwende update_observer_with_time aus obset_stream.rs)
+            for (index, observations, age, time_val) in time_updates {
+                self.update_observer_with_time(index, observations, age, time_val);
+            }
+        }
     }
 }

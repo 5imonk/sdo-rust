@@ -3,7 +3,6 @@ mod mahalanobis_tests;
 pub mod obs;
 pub mod obset;
 mod obset_clust;
-mod obset_strcl;
 mod obset_stream;
 pub mod sdo_impl;
 pub mod sdoclust_impl;

@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 // Import the internal modules directly for benchmarks
 use sdo::obs::Observer;
 use sdo::obset::ObserverSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 fn create_test_observer(index: usize, data: Vec<f64>, observations: f64) -> Observer {
@@ -11,8 +12,8 @@ fn create_test_observer(index: usize, data: Vec<f64>, observations: f64) -> Obse
         time: index as f64,
         age: 1.0,
         index,
-        label: None,
-        cluster_observations: Vec::new(),
+        local_threshold: 0.0,
+        label_observations: HashMap::new(),
     }
 }
 
@@ -140,7 +141,7 @@ fn benchmark_clustering(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("learn_cluster", size), size, |b, _| {
             b.iter(|| {
                 let mut test_obset = obset.clone();
-                let clusters = test_obset.learn_cluster(5, 0.5, 3, false);
+                let clusters = test_obset.learn_cluster(5, 0.5, 3);
                 black_box(clusters.len())
             });
         });

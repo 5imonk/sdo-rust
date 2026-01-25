@@ -98,22 +98,28 @@ pub struct Observer {
     /// last time the observer was updated
     pub age: f64,
     pub index: usize,
-    pub label: Option<i32>,
-    /// Cluster observations Lω ∈ R^|C| - historische Cluster-Zugehörigkeiten
-    pub cluster_observations: Vec<f64>,
+    /// Local threshold h_ω
+    pub local_threshold: f64,
+    /// Label observations Lω ∈ R^|C| - historische Cluster-Zugehörigkeiten
+    pub label_observations: HashMap<usize, f64>,
 }
 
 impl Observer {
+    pub fn get_label(&self) -> Option<usize> {
+        self.label_observations
+            .iter()
+            .max_by(|(_, &a), (_, &b)| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&label, _)| label)
+    }
     /// Gibt den normalisierten Cluster-Score für diesen Observer zurück
     /// Normalisiert den Lω Vektor so dass die Summe = 1 (leerer Vektor -> leere HashMap)
-    pub fn get_normalized_cluster_score(&self) -> HashMap<i32, f64> {
-        let mut normalized_scores: HashMap<i32, f64> = HashMap::new();
+    pub fn get_normalized_label_observations(&self) -> HashMap<usize, f64> {
+        let mut normalized_scores: HashMap<usize, f64> = HashMap::new();
 
-        if !self.cluster_observations.is_empty() {
-            let sum: f64 = self.cluster_observations.iter().sum();
+        if !self.label_observations.is_empty() {
+            let sum: f64 = self.label_observations.values().sum();
             if sum > 0.0 {
-                for (label_idx, &value) in self.cluster_observations.iter().enumerate() {
-                    let label = label_idx as i32;
+                for (&label, &value) in self.label_observations.iter() {
                     let normalized_value = value / sum;
                     normalized_scores.insert(label, normalized_value);
                 }

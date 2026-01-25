@@ -96,16 +96,15 @@ impl SDOclust {
     pub fn get_active_observers(&self, py: Python) -> PyResult<Py<PyArray2<f64>>> {
         self.sdo.get_active_observers(py)
     }
+
     /// Gibt die Anzahl der Cluster zurück
     pub fn n_clusters(&self) -> usize {
-        // Stelle sicher, dass Clustering durchgeführt wurde
         // Gehe durch alle aktiven Observer und sammle eindeutige Labels
-        let unique_labels: HashSet<i32> = self
+        let unique_labels: HashSet<usize> = self
             .sdo
             .observers
             .iter_observers(true)
-            .filter_map(|obs| obs.label)
-            .filter(|&label| label >= 0) // Filter out -1 labels (outliers)
+            .filter_map(|obs| obs.get_label())
             .collect();
         unique_labels.len()
     }
@@ -122,18 +121,23 @@ impl SDOclust {
         // Verwende SDO für Modell-Erstellung (Sample, Observe, Clean)
         self.sdo.learn_impl(data);
 
-        // Führe Clustering durch (schreibe Labels in obs.label)
-        self.sdo
-            .observers
-            .learn_cluster(self.chi, self.zeta, self.min_cluster_size, true);
+        // Führe vollständiges Clustering durch (inkl. Thresholds, Connected Components, Label-Zuweisung)
+        // Kein Fading für statisches Clustering
+        self.sdo.observers.learn_clustering(
+            self.chi,
+            self.zeta,
+            self.min_cluster_size,
+            None, // Kein Fading für statisches Clustering
+            None, // Keine Zeit für statisches Clustering
+        );
     }
 
-    pub fn predict_impl(&self, point: &Vec<f64>) -> i32 {
+    pub fn predict_impl(&self, point: &[f64]) -> i32 {
         if self.sdo.observers.is_empty() {
             return -1; // Kein Label (Outlier)
         }
 
-        // Finde die x nächsten Nachbarn unter den aktiven Observers (using optimized unified search)
+        // Finde die x nächsten Nachbarn unter den aktiven Observers
         let (active_neighbors, _) = self
             .sdo
             .observers
@@ -141,47 +145,41 @@ impl SDOclust {
         let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Zähle die Häufigkeit der Labels
-        let mut label_counts: HashMap<i32, usize> = HashMap::new();
+        let mut label_counts: HashMap<usize, usize> = HashMap::new();
         for idx in nearest_indices {
             if let Some(obs) = self.sdo.observers.get(idx) {
-                if let Some(label) = obs.label {
-                    if label >= 0 {
-                        *label_counts.entry(label).or_insert(0) += 1;
-                    }
+                if let Some(label) = obs.get_label() {
+                    *label_counts.entry(label).or_insert(0) += 1;
                 }
             }
         }
 
-        // Gib das häufigste Label zurück (optimiert mit vorgefilterten aktiven Observers)
+        // Gib das häufigste Label zurück (konvertiere zu i32 für Python-API)
         if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
-            most_common_label
+            most_common_label as i32
         } else {
             -1 // Kein Label gefunden (Outlier)
         }
     }
 
-    /// Gibt die Labels der Observer zurück (optimiert mit aktiven Observer-Info)
+    /// Gibt die Labels der Observer zurück
     pub fn get_observer_labels(&self) -> Vec<i32> {
-        // Stelle sicher, dass Clustering durchgeführt wurde
-        // Gehe einfach durch alle aktiven Observer
         self.sdo
             .observers
             .iter_observers(true)
-            .map(|obs| obs.label.unwrap_or(-1))
+            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
             .collect()
     }
 
     /// Calculate Mahalanobis distance uniformity score for a specific cluster
-    /// Returns convexity score where lower values indicate more convex (uniform) distribution
     pub fn get_cluster_convexity_score(&self, cluster_label: i32) -> f64 {
-        // Find all observers belonging to the specified cluster
+        let cluster_label_usize = cluster_label as usize;
         let cluster_observers: Vec<usize> = self
             .sdo
             .observers
             .iter_observers(true)
-            .enumerate()
-            .filter_map(|(_i, obs)| {
-                if obs.label == Some(cluster_label) {
+            .filter_map(|obs| {
+                if obs.get_label() == Some(cluster_label_usize) {
                     Some(obs.index)
                 } else {
                     None
@@ -190,28 +188,26 @@ impl SDOclust {
             .collect();
 
         if cluster_observers.is_empty() {
-            return f64::INFINITY; // No observers for this cluster
+            return f64::INFINITY;
         }
 
-        // Calculate Mahalanobis score for cluster observers
         self.sdo
             .observers
             .mahalanobis_uniformity_score(Some(&cluster_observers))
     }
 
     /// Calculate convexity scores for all clusters
-    /// Returns HashMap mapping cluster labels to their convexity scores
     pub fn get_all_cluster_convexity_scores(&self) -> HashMap<i32, f64> {
         let mut scores = HashMap::new();
-        let cluster_labels: std::collections::HashSet<i32> = self
+        let cluster_labels: HashSet<usize> = self
             .sdo
             .observers
             .iter_observers(true)
-            .filter_map(|obs| obs.label)
+            .filter_map(|obs| obs.get_label())
             .collect();
 
         for &label in &cluster_labels {
-            scores.insert(label, self.get_cluster_convexity_score(label));
+            scores.insert(label as i32, self.get_cluster_convexity_score(label as i32));
         }
 
         scores
