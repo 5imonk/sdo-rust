@@ -33,7 +33,8 @@ def test_dimension_only_initialization():
     t_fading = 10.0
     sdostream = SDOstream(k=k, x=x, t_fading=t_fading, dimension=dimension)
     assert sdostream.k == k and sdostream.x == x
-    assert sdostream.observer_count == k and sdostream.data_points_processed == 0
+    # dimension-only init generates k random points → data_points_processed == k
+    assert sdostream.observer_count == k and sdostream.data_points_processed == k
     for i in range(k):
         observations, age, time, is_active, label = sdostream.get_observer_info(i)
         assert observations == 1.0 and age == 1.0 and is_active == True and label is None
@@ -55,7 +56,8 @@ def test_basic_streaming_controlled():
         sdostream.predict(point_2d)
         sdostream.learn(point_2d)
         assert np.isfinite(sdostream.predict(point_2d))
-    assert sdostream.data_points_processed == len(test_points)
+    # init uses len(init_data) points, then we learn len(test_points) more
+    assert sdostream.data_points_processed == len(init_data) + len(test_points)
     print("✓ Test 2 bestanden")
     return True
 

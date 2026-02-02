@@ -8,6 +8,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
 sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, _THIS_DIR)
 
+from common import get_observers_and_labels
 from sdo import SDOstreamclust
 import numpy as np
 import pandas as pd
@@ -58,33 +59,8 @@ def load_data(filename):
     return t,x,y,n,m,clusters,outliers,dataname
 
 def get_observers_info(classifier):
-    """Extrahiert alle aktiven Observer-Positionen und Labels"""
-    try:
-        # #[getter] in PyO3 removes the "get_" prefix, so get_observers() is available as "observers"
-        if hasattr(classifier, 'observers'):
-            observers = classifier.observers
-        elif hasattr(classifier, 'get_observers'):
-            observers = classifier.get_observers
-        else:
-            raise AttributeError("observers/get_observers method not found - module may need to be recompiled")
-        
-        if callable(observers):
-            observers = observers()
-        
-        if not observers or len(observers) == 0:
-            return np.array([]), np.array([])
-        
-        obs_points = []
-        obs_labels = []
-        
-        for data, label in observers:
-            obs_points.append(data)
-            obs_labels.append(label if label is not None else -1)
-        
-        return np.array(obs_points), np.array(obs_labels)
-    except Exception as e:
-        print(f"Error getting observers: {e}")
-        return np.array([]), np.array([])
+    """Extrahiert alle aktiven Observer-Positionen und Labels (API: get_active_observers, get_observer_labels)."""
+    return get_observers_and_labels(classifier)
 
 def get_all_observers_info(classifier):
     """Sammelt alle Observer-Informationen (aktiv + inaktiv)"""
@@ -230,14 +206,12 @@ all_obs_t = []
 
 # Observer-Informationen vor dem ersten Block
 obs_points, obs_labels = get_observers_info(classifier)
-print(obs_points, obs_labels)
 all_obs_points.append(obs_points)
 all_obs_labels.append(obs_labels)
 all_obs_t.append(t[0])
 
 # CSV-Ausgabe aller Observer-Informationen
 all_observers = get_all_observers_info(classifier)
-print(all_observers)
 print_observers_csv(all_observers, block_num=0, time=t[0], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
 # Process the first block separately 
@@ -262,7 +236,6 @@ all_obs_t.append(chunk_time[-1])
 
 # CSV-Ausgabe aller Observer-Informationen
 all_observers = get_all_observers_info(classifier)
-print(all_observers)
 print_observers_csv(all_observers, block_num=1, time=chunk_time[-1], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
 # Process the remaining blocks with size block_size
