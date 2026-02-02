@@ -8,7 +8,7 @@ use std::f64;
 use crate::obs::Observer;
 use crate::sdo_impl::SDO;
 use crate::utils::{
-    compute_median, data_to_matrix, point_to_vec, sample_random_matrix_distr, time_to_f64,
+    compute_median, data_to_matrix, point_to_vec, sample_random_matrix_uniform_unit, time_to_f64,
 };
 
 impl SDOstream {
@@ -251,8 +251,8 @@ impl SDOstream {
                 }
                 existing_data.clone() // Clone the user's data
             }
-            // Case 2: No data provided but dimension specified → generate random data
-            (None, Some(dim)) => sample_random_matrix_distr(dim, self.k),
+            // Case 2: No data provided but dimension specified → uniform in unit square [0,1]^d
+            (None, Some(dim)) => sample_random_matrix_uniform_unit(dim, self.k),
             // Case 3: No data and no dimension → initialize empty
             (None, None) => {
                 self.sdo.observers.set_num_active(0);

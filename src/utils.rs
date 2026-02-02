@@ -137,6 +137,18 @@ pub fn sample_random_matrix_distr(dimension: usize, sample_size: usize) -> Vec<V
     random_matrix
 }
 
+/// Generates a random matrix uniformly distributed in the unit hypercube [0, 1]^dimension.
+/// Used for SDOstream dimension-only init (no domain knowledge).
+pub fn sample_random_matrix_uniform_unit(dimension: usize, sample_size: usize) -> Vec<Vec<f64>> {
+    let mut rng = thread_rng();
+    let mut random_matrix: Vec<Vec<f64>> = Vec::with_capacity(sample_size);
+    for _ in 0..sample_size {
+        let point: Vec<f64> = (0..dimension).map(|_| rng.gen::<f64>()).collect();
+        random_matrix.push(point);
+    }
+    random_matrix
+}
+
 pub fn compute_median(values: &Vec<f64>) -> f64 {
     let mut sorted_values = values.clone();
     sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
