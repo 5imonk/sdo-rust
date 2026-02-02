@@ -105,7 +105,7 @@ def example_sdoclust():
     labels = []
     for point in data:
         point_2d = point.reshape(1, -1)
-        label = sdoclust.predict(point_2d)
+        label, _ = sdoclust.predict(point_2d, False)
         labels.append(label)
     
     labels = np.array(labels)
@@ -128,14 +128,14 @@ def example_sdoclust():
     
     for point, description in test_points:
         point_2d = np.array([point], dtype=np.float64)
-        label = sdoclust.predict(point_2d)
+        label, _ = sdoclust.predict(point_2d, False)
         print(f"  {description:25}: Label = {label}")
     
     # Outlier-Scores
     print("\nOutlier-Scores für Test-Punkte:")
     for point, description in test_points:
         point_2d = np.array([point], dtype=np.float64)
-        score = sdoclust.predict_outlier_score(point_2d)
+        _, score = sdoclust.predict(point_2d, True)
         print(f"  {description:25}: Score = {score:.4f}")
     
     print("\n" + "=" * 70 + "\n")
@@ -159,7 +159,7 @@ def example_sdostream():
     print(f"\nInitialisierungsdaten: {init_data.shape[0]} Punkte")
     
     sdostream = SDOstream(k=10, x=5, t_fading=10.0, data=init_data)
-    print(f"✓ Modell initialisiert mit {sdostream.sdo.x} Observern")
+    print(f"✓ Modell initialisiert mit {sdostream.x} Observern")
     print(f"  Fading-Parameter f = exp(-1/T_fading) = {np.exp(-1.0/10.0):.4f}")
     print(f"  Sampling-Rate T_sampling = t_fading/k = {10.0/10:.2f} (automatisch berechnet)")
     
@@ -190,7 +190,7 @@ def example_sdostream():
         print(f"  {i}. {label:8}: [{point[0]:5.1f}, {point[1]:5.1f}] "
               f"→ Score: {score_before:.4f} → {score_after:.4f}")
     
-    print(f"\nFinale Anzahl Observer: {sdostream.sdo.x}")
+    print(f"\nFinale Anzahl Observer: {sdostream.x}")
     
     # Zeige, wie sich das Modell an neue Daten anpasst
     print("\nAnpassung an neue Daten (Fading-Effekt):")
@@ -235,8 +235,7 @@ def example_comparison():
     print("\n2. SDOclust (Clustering + Outlier Detection):")
     sdoclust = SDOclust(k=15, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     sdoclust.learn(data)
-    sdoclust_label = sdoclust.predict(test_point)
-    sdoclust_score = sdoclust.predict_outlier_score(test_point)
+    sdoclust_label, sdoclust_score = sdoclust.predict(test_point, True)
     print(f"   Cluster-Label: {sdoclust_label}")
     print(f"   Outlier-Score: {sdoclust_score:.4f}")
     print(f"   Anzahl Cluster: {sdoclust.n_clusters()}")
@@ -252,55 +251,10 @@ def example_comparison():
     
     sdostream_score = sdostream.predict(test_point)
     print(f"   Score: {sdostream_score:.4f}")
-    print(f"   Anzahl Observer: {sdostream.sdo.x}")
+    print(f"   Anzahl Observer: {sdostream.x}")
     print(f"   Fading-Parameter f = {np.exp(-1.0/10.0):.4f}")
     
     print("\n" + "=" * 70 + "\n")
-
-
-def example_sklearn_integration():
-    """Beispiel für sklearn-Integration"""
-    print("=" * 70)
-    print("Beispiel 5: Scikit-learn-ähnliche API")
-    print("=" * 70)
-    
-    try:
-        from sdo_sklearn import SDOOutlierDetector
-        from sdoclust_sklearn import SDOclustClusterer
-        from sdostream_sklearn import SDOstreamOutlierDetector
-        
-        # SDO mit sklearn-API
-        print("\n1. SDO mit sklearn-API:")
-        detector = SDOOutlierDetector(k=15, x=5, rho=0.2)
-        
-        np.random.seed(42)
-        X = np.random.randn(50, 2) * 1.5 + np.array([3.0, 3.0])
-        X = X.astype(np.float64)
-        
-        scores = detector.fit_predict(X)
-        print(f"   Trainiert mit {len(X)} Punkten")
-        print(f"   Top 3 Outlier-Scores: {np.sort(scores)[::-1][:3]}")
-        
-        # SDOstream mit sklearn-API
-        print("\n2. SDOstream mit sklearn-API:")
-        stream_detector = SDOstreamOutlierDetector(k=10, x=5, t_fading=10.0)
-        stream_detector.fit(X[:20])  # Initialisiere mit ersten 20 Punkten
-        
-        # Streaming
-        for point in X[20:30]:
-            point_2d = point.reshape(1, -1)
-            score = stream_detector.predict(point_2d)
-            stream_detector.partial_fit(point_2d)
-            print(f"   Punkt [{point[0]:5.1f}, {point[1]:5.1f}]: Score = {score[0]:.4f}")
-        
-        print("\n✓ sklearn-Integration erfolgreich")
-        
-    except ImportError as e:
-        print(f"\n⚠ sklearn-Wrapper nicht verfügbar: {e}")
-        print("   Installiere die sklearn-Wrapper-Dateien für diese Funktionalität")
-    
-    print("\n" + "=" * 70 + "\n")
-
 
 def main():
     """Hauptfunktion - führt alle Beispiele aus"""
@@ -313,7 +267,6 @@ def main():
         example_sdoclust()
         example_sdostream()
         example_comparison()
-        example_sklearn_integration()
         
         print("=" * 70)
         print("✓ Alle Beispiele erfolgreich abgeschlossen!")
