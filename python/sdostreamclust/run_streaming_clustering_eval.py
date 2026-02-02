@@ -14,9 +14,10 @@ import numpy as np
 import pandas as pd
 from scipy.io import arff
 
-# Add paths for sdo module and ensure we use virtual environment
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, '/home/simon/sdo/.venv/lib/python3.12/site-packages')
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
+sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, _THIS_DIR)
 
 try:
     from sdo import SDOstreamclust
@@ -277,11 +278,11 @@ def main():
     
     parser = argparse.ArgumentParser(description='Pure Streaming Clustering Evaluation')
     parser.add_argument('--data-folders', nargs='+', 
-                       default=['/home/simon/sdo/evaluation_tests/data/synthetic'],
+                       default=[os.path.join(_REPO_ROOT, 'evaluation_tests', 'data', 'synthetic')],
                        help='Dataset folders to process')
     parser.add_argument('--output', 
-                       default='/home/simon/sdo/evaluation_results',
-                       help='Output directory for results')
+                       default=os.path.join(_THIS_DIR, 'out'),
+                       help='Output directory for results (default: python/sdostreamclust/out)')
     parser.add_argument('--log-level', 
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        default='INFO',

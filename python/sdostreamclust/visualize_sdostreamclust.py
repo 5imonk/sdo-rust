@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+import sys
+import os
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
+sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, _THIS_DIR)
+
 from sdo import SDOstreamclust
 import numpy as np
 import pandas as pd
@@ -13,12 +21,10 @@ from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.metrics import roc_auc_score
 
 import moviepy.editor as mpy
-import os
 
-# Directory to save the frames
-frames_dir = 'frames'
-if not os.path.exists(frames_dir):
-    os.makedirs(frames_dir)
+# Output under python/sdostreamclust/out/
+frames_dir = os.path.join(_THIS_DIR, "out", "frames")
+os.makedirs(frames_dir, exist_ok=True)
 
 # retrieve dataset from file into x,y arrays
 def load_data(filename):
@@ -174,7 +180,7 @@ def print_observers_csv(observers_data, block_num, time, output_file='observers_
                 row.extend(obs['cluster_observations'])
             writer.writerow(row)
 
-filename = 'evaluation_tests/data/example/concept_drift.arff'
+filename = os.path.join(_REPO_ROOT, "evaluation_tests", "data", "example", "concept_drift.arff")
 t,x,y,n,m,clusters,outliers,dataname = load_data(filename)
 
 # Set the initial block to be of size k
@@ -232,7 +238,7 @@ all_obs_t.append(t[0])
 # CSV-Ausgabe aller Observer-Informationen
 all_observers = get_all_observers_info(classifier)
 print(all_observers)
-print_observers_csv(all_observers, block_num=0, time=t[0], output_file='observers_info.csv')
+print_observers_csv(all_observers, block_num=0, time=t[0], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
 # Process the first block separately 
 chunk = x[:first_block_size, :]
@@ -257,7 +263,7 @@ all_obs_t.append(chunk_time[-1])
 # CSV-Ausgabe aller Observer-Informationen
 all_observers = get_all_observers_info(classifier)
 print(all_observers)
-print_observers_csv(all_observers, block_num=1, time=chunk_time[-1], output_file='observers_info.csv')
+print_observers_csv(all_observers, block_num=1, time=chunk_time[-1], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
 # Process the remaining blocks with size block_size
 for i in range(first_block_size, x.shape[0], block_size):
@@ -284,7 +290,7 @@ for i in range(first_block_size, x.shape[0], block_size):
     all_observers = get_all_observers_info(classifier)
     print(all_observers)
     block_num = (i - first_block_size) // block_size + 1
-    print_observers_csv(all_observers, block_num=block_num+1, time=chunk_time[-1], output_file='observers_info.csv')
+    print_observers_csv(all_observers, block_num=block_num+1, time=chunk_time[-1], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
 p = np.array(all_predic) # clustering labels
 s = np.array(all_scores) # outlierness scores
@@ -577,7 +583,7 @@ plt.close(fig)
 
 # Create a video from the saved frames
 clip = mpy.ImageSequenceClip(frame_files, fps=10)
-video_file = 'conglomerate_drift.mp4'
+video_file = os.path.join(_THIS_DIR, "out", "conglomerate_drift.mp4")
 clip.write_videofile(video_file, codec='libx264')
 
 # Clean up frames
