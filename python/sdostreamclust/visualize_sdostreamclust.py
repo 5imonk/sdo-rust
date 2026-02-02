@@ -168,16 +168,16 @@ block_size = 50  # Remaining blocks will have this size
 f_T = 20
 
 k = 400 # Model size
-T = 500 # Time Horizon (wird zu t_fading)
+T = 600 # Time Horizon (wird zu t_fading)
 # Parameter-Mapping:
 # T -> t_fading
 # qv -> rho (Anteil inaktiver Observer, also rho = 1 - qv)
 # e -> min_cluster_size
 qv = 0.2
 rho = 1 - qv  # rho = 0.8 bedeutet 80% aktive Observer
-e = 3
+e = 1
 min_cluster_size = e
-chi_prop = 0.25
+chi_prop = 0.025
 chi_min = 1
 zeta = 0.7
 # outlier_threshold und outlier_handling nicht direkt verfügbar - Outlier-Detection über Labels -1
@@ -261,7 +261,6 @@ for i in range(first_block_size, x.shape[0], block_size):
     
     # CSV-Ausgabe aller Observer-Informationen
     all_observers = get_all_observers_info(classifier)
-    print(all_observers)
     block_num = (i - first_block_size) // block_size + 1
     print_observers_csv(all_observers, block_num=block_num+1, time=chunk_time[-1], output_file=os.path.join(_THIS_DIR, "out", "observers_info.csv"))
 
