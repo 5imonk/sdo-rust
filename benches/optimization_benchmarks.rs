@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 // Import the internal modules directly for benchmarks
 use sdo::obs::Observer;
 use sdo::obset::ObserverSet;
+use sdo::utils::DistanceMetric;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -17,8 +18,13 @@ fn create_test_observer(index: usize, data: Vec<f64>, observations: f64) -> Obse
     }
 }
 
-fn create_test_observer_set(size: usize, dimensions: usize) -> ObserverSet {
-    let mut obset = ObserverSet::new();
+fn create_test_observer_set(
+    size: usize,
+    dimensions: usize,
+    distance_metric: DistanceMetric,
+    minkowski_p: Option<f64>,
+) -> ObserverSet {
+    let mut obset = ObserverSet::new(distance_metric, minkowski_p);
 
     for i in 0..size {
         let data: Vec<f64> = (0..dimensions)
@@ -38,7 +44,7 @@ fn benchmark_distance_insertion(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for size in [100, 500, 1000, 2000].iter() {
-        let obset = create_test_observer_set(*size, 5);
+        let obset = create_test_observer_set(*size, 5, DistanceMetric::Euclidean, None);
         let new_data = vec![999.0, 1000.0, 1001.0, 1002.0, 1003.0];
 
         group.bench_with_input(BenchmarkId::new("optimized_insert", size), size, |b, _| {
@@ -59,7 +65,7 @@ fn benchmark_neighbor_finding(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for size in [100, 500, 1000, 2000].iter() {
-        let obset = create_test_observer_set(*size, 5);
+        let obset = create_test_observer_set(*size, 5, DistanceMetric::Euclidean, None);
 
         for k in [5, 10, 50].iter() {
             group.bench_with_input(
@@ -99,7 +105,7 @@ fn benchmark_batch_operations(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for size in [100, 500, 1000].iter() {
-        let obset = create_test_observer_set(*size, 5);
+        let obset = create_test_observer_set(*size, 5, DistanceMetric::Euclidean, None);
         let batch_size = size / 10;
         let updated_indices: Vec<usize> = (0..batch_size).collect();
 
@@ -126,7 +132,7 @@ fn benchmark_memory_usage(c: &mut Criterion) {
             size,
             |b, size| {
                 b.iter(|| {
-                    let obset = create_test_observer_set(*size, 5);
+                    let obset = create_test_observer_set(*size, 5, DistanceMetric::Euclidean, None);
                     black_box(obset.len())
                 });
             },
