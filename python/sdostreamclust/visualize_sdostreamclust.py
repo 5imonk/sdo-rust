@@ -167,8 +167,8 @@ block_size = 50  # Remaining blocks will have this size
 # obs_T is time of model (observer) snapshot
 f_T = 20
 
-k = 400 # Model size
-T = 600 # Time Horizon (wird zu t_fading)
+k = 500 # Model size
+T = 1000 # Time Horizon (wird zu t_fading)
 # Parameter-Mapping:
 # T -> t_fading
 # qv -> rho (Anteil inaktiver Observer, also rho = 1 - qv)
@@ -177,7 +177,7 @@ qv = 0.2
 rho = 1 - qv  # rho = 0.8 bedeutet 80% aktive Observer
 e = 1
 min_cluster_size = e
-chi_prop = 0.025
+chi_prop = 0.05
 chi_min = 1
 zeta = 0.7
 # outlier_threshold und outlier_handling nicht direkt verfügbar - Outlier-Detection über Labels -1
