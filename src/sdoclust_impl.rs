@@ -147,7 +147,7 @@ impl SDOclust {
         }
 
         // Finde die x nächsten Nachbarn unter den aktiven Observers
-        let (active_neighbors, _) = self
+        let (_, active_neighbors) = self
             .sdo
             .observers
             .search_neighbors_unified(point, self.sdo.x, true);
