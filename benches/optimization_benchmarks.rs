@@ -38,9 +38,8 @@ fn benchmark_distance_insertion(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for size in [100, 500, 1000, 2000].iter() {
-        let mut obset = create_test_observer_set(*size, 5);
+        let obset = create_test_observer_set(*size, 5);
         let new_data = vec![999.0, 1000.0, 1001.0, 1002.0, 1003.0];
-        let new_observer = create_test_observer(*size, new_data.clone(), 50.0);
 
         group.bench_with_input(BenchmarkId::new("optimized_insert", size), size, |b, _| {
             b.iter(|| {
@@ -95,67 +94,12 @@ fn benchmark_neighbor_finding(c: &mut Criterion) {
     group.finish();
 }
 
-fn benchmark_threshold_computation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("threshold_computation");
-    group.measurement_time(Duration::from_secs(10));
-
-    for size in [100, 500, 1000, 2000].iter() {
-        let mut obset = create_test_observer_set(*size, 5);
-
-        // Benchmark uncached computation
-        group.bench_with_input(
-            BenchmarkId::new("uncached_threshold", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    for i in 0..10.min(*size) {
-                        let threshold = obset.compute_local_threshold_cached(i, 5);
-                        black_box(threshold);
-                    }
-                });
-            },
-        );
-
-        // Benchmark cached computation
-        group.bench_with_input(BenchmarkId::new("cached_threshold", size), size, |b, _| {
-            b.iter(|| {
-                obset.validate_threshold_cache();
-                for i in 0..10.min(*size) {
-                    let threshold = obset.compute_local_threshold_cached(i, 5);
-                    black_box(threshold);
-                }
-            });
-        });
-    }
-
-    group.finish();
-}
-
-fn benchmark_clustering(c: &mut Criterion) {
-    let mut group = c.benchmark_group("clustering");
-    group.measurement_time(Duration::from_secs(30));
-
-    for size in [50, 100, 200, 500].iter() {
-        let mut obset = create_test_observer_set(*size, 5);
-
-        group.bench_with_input(BenchmarkId::new("learn_cluster", size), size, |b, _| {
-            b.iter(|| {
-                let mut test_obset = obset.clone();
-                let clusters = test_obset.learn_cluster(5, 0.5, 3);
-                black_box(clusters.len())
-            });
-        });
-    }
-
-    group.finish();
-}
-
 fn benchmark_batch_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_operations");
     group.measurement_time(Duration::from_secs(10));
 
     for size in [100, 500, 1000].iter() {
-        let mut obset = create_test_observer_set(*size, 5);
+        let obset = create_test_observer_set(*size, 5);
         let batch_size = size / 10;
         let updated_indices: Vec<usize> = (0..batch_size).collect();
 
@@ -196,8 +140,6 @@ criterion_group!(
     benches,
     benchmark_distance_insertion,
     benchmark_neighbor_finding,
-    benchmark_threshold_computation,
-    benchmark_clustering,
     benchmark_batch_operations,
     benchmark_memory_usage
 );

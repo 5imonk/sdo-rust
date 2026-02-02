@@ -129,8 +129,8 @@ impl ObserverSet {
             index,
         };
 
-        self.indices_by_obs.insert(new_obs_key, index);
-        self.indices_by_score.insert(new_score_key, index);
+        self.indices_by_obs.insert(new_obs_key);
+        self.indices_by_score.insert(new_score_key);
 
         true
     }

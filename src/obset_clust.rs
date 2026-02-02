@@ -25,7 +25,7 @@ impl ObserverSet {
             let final_threshold_current = zeta * h_omega_current + (1.0 - zeta) * global_threshold;
 
             // Sammle potenzielle Nachbarn aus der Distanzliste
-            if let Some(distance_list) = self.distance_lists.get(&current_index) {
+            if let Some(distance_list) = self.distance_matrix.get(current_index) {
                 let end_pos = distance_list.find_threshold_position(final_threshold_current);
 
                 // Wir müssen über alle Nachbarn iterieren, die näher als final_threshold_current sind
@@ -237,7 +237,7 @@ impl ObserverSet {
 
     /// Berechnet und setzt lokale und globale Thresholds für alle aktiven Observer
     pub fn set_thresholds(&mut self, chi: usize) {
-        if self.distance_lists.is_empty() {
+        if self.distance_matrix.is_empty() {
             self.rebuild_distance_lists();
         }
 
@@ -259,7 +259,7 @@ impl ObserverSet {
 
     /// Implementierung der lokalen Threshold-Berechnung
     pub(crate) fn compute_local_threshold_impl(&self, index: usize, chi: usize) -> f64 {
-        if let Some(list) = self.distance_lists.get(&index) {
+        if let Some(list) = self.distance_matrix.get(index) {
             let mut found = 0;
 
             // Iteriere über sortierte Distanzen bis chi aktive Observer gefunden

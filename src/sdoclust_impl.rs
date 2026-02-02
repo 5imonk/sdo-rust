@@ -97,6 +97,15 @@ impl SDOclust {
         self.sdo.get_active_observers(py)
     }
 
+    /// Gibt die Cluster-Labels der aktiven Observer zurück (-1 = kein Label/Outlier).
+    pub fn get_observer_labels(&self) -> Vec<i32> {
+        self.sdo
+            .observers
+            .iter_observers(true)
+            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
+            .collect()
+    }
+
     /// Gibt die Anzahl der Cluster zurück
     pub fn n_clusters(&self) -> usize {
         // Gehe durch alle aktiven Observer und sammle eindeutige Labels
@@ -160,57 +169,6 @@ impl SDOclust {
         } else {
             -1 // Kein Label gefunden (Outlier)
         }
-    }
-
-    /// Gibt die Labels der Observer zurück
-    pub fn get_observer_labels(&self) -> Vec<i32> {
-        self.sdo
-            .observers
-            .iter_observers(true)
-            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
-            .collect()
-    }
-
-    /// Calculate Mahalanobis distance uniformity score for a specific cluster
-    pub fn get_cluster_convexity_score(&self, cluster_label: i32) -> f64 {
-        let cluster_label_usize = cluster_label as usize;
-        let cluster_observers: Vec<usize> = self
-            .sdo
-            .observers
-            .iter_observers(true)
-            .filter_map(|obs| {
-                if obs.get_label() == Some(cluster_label_usize) {
-                    Some(obs.index)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if cluster_observers.is_empty() {
-            return f64::INFINITY;
-        }
-
-        self.sdo
-            .observers
-            .mahalanobis_uniformity_score(Some(&cluster_observers))
-    }
-
-    /// Calculate convexity scores for all clusters
-    pub fn get_all_cluster_convexity_scores(&self) -> HashMap<i32, f64> {
-        let mut scores = HashMap::new();
-        let cluster_labels: HashSet<usize> = self
-            .sdo
-            .observers
-            .iter_observers(true)
-            .filter_map(|obs| obs.get_label())
-            .collect();
-
-        for &label in &cluster_labels {
-            scores.insert(label as i32, self.get_cluster_convexity_score(label as i32));
-        }
-
-        scores
     }
 }
 

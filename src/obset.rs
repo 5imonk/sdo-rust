@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::obs::{
-    NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedDistanceList, OrderedFloat,
-};
+use crate::distance_matrix::DistanceMatrix;
+use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
 use crate::utils::{compute_distance, DistanceMetric};
 
 /// Efficient ObserverSet with dual indexing for O(log n) operations
@@ -14,15 +13,13 @@ pub struct ObserverSet {
     // Primary storage: O(1) access by index, Arc for shared ownership
     pub(crate) observers_by_index: HashMap<usize, Arc<Observer>>,
 
-    // Secondary index: sorted by observations (descending) - stores only indices
-    // Key: (observations, index) -> index
-    // BTreeMap gives us O(log n) for min/max and sorted iteration
-    pub(crate) indices_by_obs: BTreeMap<ObservationKey, usize>,
+    // Secondary index: sorted by observations (descending)
+    // BTreeSet gives us O(log n) for min/max and sorted iteration, no redundant value
+    pub(crate) indices_by_obs: BTreeSet<ObservationKey>,
 
-    // Tertiary index: sorted by normalized score (observations/age, ascending) - stores only indices
-    // Key: (normalized_score, index) -> index
-    // This allows O(log n) finding of worst observer
-    pub(crate) indices_by_score: BTreeMap<NormalizedScoreKey, usize>,
+    // Tertiary index: sorted by normalized score (observations/age, ascending)
+    // O(log n) finding of worst observer
+    pub(crate) indices_by_score: BTreeSet<NormalizedScoreKey>,
 
     // Parameters for distance computation
     distance_metric: DistanceMetric,
@@ -35,44 +32,26 @@ pub struct ObserverSet {
     // None if num_active == 0 or there are fewer than num_active observers
     last_active_observer: Option<usize>,
 
-    // Geordnete Distanzlisten für jeden Observer (für effiziente lokale Threshold-Berechnung)
-    // Key: observer_index -> OrderedDistanceList
-    // Wird nur aktualisiert wenn clustering aktiv ist (lazy initialization)
-    pub(crate) distance_lists: HashMap<usize, OrderedDistanceList>,
+    // Sparse distance matrix for local threshold / clustering (lazy initialization)
+    pub(crate) distance_matrix: DistanceMatrix,
     pub(crate) global_threshold: f64,
     pub(crate) last_label: usize,
 }
 
 impl ObserverSet {
-    pub fn new() -> Self {
+    pub fn new(distance_metric: DistanceMetric, minkowski_p: Option<f64>) -> Self {
         Self {
             observers_by_index: HashMap::new(),
-            indices_by_obs: BTreeMap::new(),
-            indices_by_score: BTreeMap::new(),
-            distance_metric: DistanceMetric::Euclidean,
-            minkowski_p: None,
+            indices_by_obs: BTreeSet::new(),
+            indices_by_score: BTreeSet::new(),
+            distance_metric: distance_metric,
+            minkowski_p: minkowski_p,
             num_active: 0,
             last_active_observer: None,
-            distance_lists: HashMap::new(),
+            distance_matrix: DistanceMatrix::new(distance_metric, minkowski_p),
             global_threshold: f64::INFINITY,
             last_label: 0,
         }
-    }
-
-    /// Set distance parameters
-    pub fn set_tree_params(&mut self, distance_metric: DistanceMetric, minkowski_p: Option<f64>) {
-        self.distance_metric = distance_metric;
-        self.minkowski_p = minkowski_p;
-    }
-
-    /// Get distance metric
-    pub fn get_distance_metric(&self) -> DistanceMetric {
-        self.distance_metric
-    }
-
-    /// Get minkowski_p parameter
-    pub fn get_minkowski_p(&self) -> Option<f64> {
-        self.minkowski_p
     }
 
     /// Set num_active
@@ -99,93 +78,12 @@ impl ObserverSet {
             .indices_by_obs
             .iter()
             .nth(self.num_active - 1)
-            .map(|(_key, &idx)| idx);
+            .map(|key| key.index);
     }
 
-    /// Aktualisiert Distanzlisten, wenn ein neuer Observer eingefügt wird
-    /// Optimiert: Vermeidet doppelte Distanzberechnung durch Symmetrie
-    fn update_distance_lists_on_insert(&mut self, new_index: usize, new_data: &[f64]) {
-        // Sammle alle existierenden Observer-Daten für effizienten Zugriff
-        let existing_observers: Vec<(usize, Vec<f64>)> = self
-            .observers_by_index
-            .iter()
-            .filter(|(&idx, _)| idx != new_index)
-            .map(|(&idx, arc)| (idx, arc.data.clone()))
-            .collect();
-
-        // Berechne Distanzen nur einmal und füge sie symmetrisch hinzu
-        for (existing_index, existing_data) in existing_observers {
-            let distance = compute_distance(
-                &existing_data,
-                new_data,
-                self.distance_metric,
-                self.minkowski_p,
-            );
-
-            // Füge Distanz zur Liste des existierenden Observers hinzu
-            let list = self
-                .distance_lists
-                .entry(existing_index)
-                .or_insert_with(OrderedDistanceList::new);
-            list.insert(new_index, distance);
-        }
-
-        // Erstelle neue Distanzliste für den neuen Observer (symmetrisch)
-        let mut new_list = OrderedDistanceList::new();
-        for (existing_index, existing_data) in &self
-            .observers_by_index
-            .iter()
-            .filter(|(&idx, _)| idx != new_index)
-            .map(|(&idx, arc)| (idx, arc.data.as_slice()))
-            .collect::<Vec<_>>()
-        {
-            let distance = compute_distance(
-                new_data,
-                existing_data,
-                self.distance_metric,
-                self.minkowski_p,
-            );
-            new_list.insert(*existing_index, distance);
-        }
-        self.distance_lists.insert(new_index, new_list);
-    }
-
-    /// Aktualisiert Distanzlisten, wenn ein Observer entfernt wird
-    fn update_distance_lists_on_remove(&mut self, removed_index: usize) {
-        // Entferne die Distanzliste des entfernten Observers
-        self.distance_lists.remove(&removed_index);
-
-        // Entferne Einträge für diesen Observer aus allen anderen Distanzlisten
-        for list in self.distance_lists.values_mut() {
-            list.remove(removed_index);
-        }
-    }
-
-    /// Baut alle Distanzlisten neu auf (für initiale Berechnung oder wenn sich viele Observer geändert haben)
+    /// Rebuild the full distance matrix (e.g. for initial clustering).
     pub(crate) fn rebuild_distance_lists(&mut self) {
-        self.distance_lists.clear();
-
-        let indices: Vec<usize> = self.observers_by_index.keys().cloned().collect();
-        let data_map: HashMap<usize, &[f64]> = self
-            .observers_by_index
-            .iter()
-            .map(|(idx, arc)| (*idx, arc.data.as_slice()))
-            .collect();
-
-        for &i in &indices {
-            let mut list = OrderedDistanceList::new();
-            let data_i = data_map[&i];
-
-            for &j in &indices {
-                if i != j {
-                    let data_j = data_map[&j];
-                    let distance =
-                        compute_distance(data_i, data_j, self.distance_metric, self.minkowski_p);
-                    list.insert(j, distance);
-                }
-            }
-            self.distance_lists.insert(i, list);
-        }
+        self.distance_matrix.rebuild(&self.observers_by_index);
     }
     /// Prüft, ob ein Observer aktiv ist (gehört zu den Top num_active Observern nach observations)
     /// Ein Observer ist aktiv, wenn seine observations >= observations des last_active_observer sind
@@ -248,16 +146,21 @@ impl ObserverSet {
 
         // Insert into all structures with Arc for shared ownership
         let observer_arc = Arc::new(observer);
-        let data = observer_arc.data.clone();
         self.observers_by_index.insert(index, observer_arc);
-        self.indices_by_obs.insert(obs_key, index);
-        self.indices_by_score.insert(score_key, index);
+        self.indices_by_obs.insert(obs_key);
+        self.indices_by_score.insert(score_key);
 
         // Update last_active_observer cache, da sich die Observer-Liste geändert hat
         self.update_last_active_observer();
 
         // Update distance lists für alle Observer
-        self.update_distance_lists_on_insert(index, &data);
+        let new_observer = self
+            .observers_by_index
+            .get(&index)
+            .map(Arc::as_ref)
+            .expect("just inserted");
+        self.distance_matrix
+            .insert(new_observer, &self.observers_by_index);
     }
 
     /// Get observer by index - O(1)
@@ -332,8 +235,8 @@ impl ObserverSet {
             index,
         };
 
-        self.indices_by_obs.insert(new_obs_key, index);
-        self.indices_by_score.insert(new_score_key, index);
+        self.indices_by_obs.insert(new_obs_key);
+        self.indices_by_score.insert(new_score_key);
 
         // Update last_active_observer cache, da sich observations geändert haben
         self.update_last_active_observer();
@@ -351,9 +254,9 @@ impl ObserverSet {
             } else {
                 self.observers_by_index.len()
             })
-            .filter_map(|(_key, &index)| {
+            .filter_map(|key| {
                 self.observers_by_index
-                    .get(&index)
+                    .get(&key.index)
                     .map(|arc| (**arc).clone())
             })
             .collect()
@@ -371,7 +274,7 @@ impl ObserverSet {
             } else {
                 self.observers_by_index.len()
             })
-            .map(|(_key, &index)| index)
+            .map(|key| key.index)
             .collect();
         indices
             .into_iter()
@@ -389,7 +292,7 @@ impl ObserverSet {
         // (nicht nur den mit aktuellen observations, da sich diese geändert haben könnten)
         let keys_to_remove_obs: Vec<ObservationKey> = self
             .indices_by_obs
-            .keys()
+            .iter()
             .filter(|key| key.index == index)
             .cloned()
             .collect();
@@ -399,7 +302,7 @@ impl ObserverSet {
 
         let keys_to_remove_score: Vec<NormalizedScoreKey> = self
             .indices_by_score
-            .keys()
+            .iter()
             .filter(|key| key.index == index)
             .cloned()
             .collect();
@@ -414,7 +317,7 @@ impl ObserverSet {
         self.update_last_active_observer();
 
         // Update distance lists: Entferne diesen Observer aus allen Distanzlisten
-        self.update_distance_lists_on_remove(index);
+        self.distance_matrix.remove(index);
 
         // Return owned Observer (dereference Arc)
         Some((*observer_arc).clone())
@@ -459,7 +362,7 @@ impl ObserverSet {
         self.indices_by_score
             .iter()
             .take(k.unwrap_or(1))
-            .map(|(key, &index)| (index, key.score.0))
+            .map(|key| (key.index, key.score.0))
             .collect()
     }
 
@@ -603,8 +506,8 @@ impl ObserverSet {
         };
 
         // Single pass through sorted observers
-        for (position, (_obs_key, &observer_index)) in self.indices_by_obs.iter().enumerate() {
-            let observer = match self.observers_by_index.get(&observer_index) {
+        for (position, obs_key) in self.indices_by_obs.iter().enumerate() {
+            let observer = match self.observers_by_index.get(&obs_key.index) {
                 Some(obs) => obs,
                 None => continue,
             };
@@ -626,7 +529,7 @@ impl ObserverSet {
             );
 
             let neighbor_info = NeighborInfo {
-                index: observer_index,
+                index: obs_key.index,
                 distance,
                 is_active,
             };
@@ -648,7 +551,7 @@ impl ObserverSet {
     /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste
     /// O(k) da Distanzliste bereits sortiert ist
     pub fn get_k_nearest_neighbors(&self, observer_index: usize, k: usize) -> Vec<(usize, f64)> {
-        if let Some(distance_list) = self.distance_lists.get(&observer_index) {
+        if let Some(distance_list) = self.distance_matrix.get(observer_index) {
             let end = k.min(distance_list.distances.len());
             distance_list.distances[..end].to_vec()
         } else {
@@ -663,7 +566,7 @@ impl ObserverSet {
         observer_index: usize,
         threshold: f64,
     ) -> Vec<(usize, f64)> {
-        if let Some(distance_list) = self.distance_lists.get(&observer_index) {
+        if let Some(distance_list) = self.distance_matrix.get(observer_index) {
             let end_pos = distance_list.find_threshold_position(threshold);
             distance_list.distances[..end_pos].to_vec()
         } else {
@@ -704,10 +607,10 @@ impl ObserverSet {
                         );
 
                         // Aktualisiere beide Richtungen
-                        if let Some(list_i) = self.distance_lists.get_mut(&i) {
+                        if let Some(list_i) = self.distance_matrix.get_mut(i) {
                             list_i.insert(j, distance);
                         }
-                        if let Some(list_j) = self.distance_lists.get_mut(&j) {
+                        if let Some(list_j) = self.distance_matrix.get_mut(j) {
                             list_j.insert(i, distance);
                         }
                     }
@@ -716,9 +619,9 @@ impl ObserverSet {
         }
     }
 
-    /// Calculate Mahalanobis distance uniformity score for a subset of observers
-    /// Returns a score where lower values indicate more uniform (convex) distribution
-    /// Higher values indicate stronger non-uniformity
+    /// Calculate Mahalanobis distance uniformity score for a subset of observers.
+    /// Requires feature "mahalanobis". Returns a score where lower = more uniform (convex).
+    #[cfg(feature = "mahalanobis")]
     pub fn mahalanobis_uniformity_score(&self, observer_indices: Option<&[usize]>) -> f64 {
         // Collect observer data based on indices
         let observer_data: Vec<Vec<f64>> = match observer_indices {
@@ -820,12 +723,12 @@ impl ObserverSet {
 
 impl Default for ObserverSet {
     fn default() -> Self {
-        Self::new()
+        Self::new(DistanceMetric::Euclidean, None)
     }
 }
 
-/// Simple matrix inverse for 2x2 or 3x3 matrices
-/// Returns None for non-invertible matrices
+/// Simple matrix inverse for 2x2 or 3x3 matrices (used only for Mahalanobis).
+#[cfg(feature = "mahalanobis")]
 fn matrix_inverse_2x2_or_3x3(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let n = matrix.len();
 
@@ -875,7 +778,8 @@ fn matrix_inverse_2x2_or_3x3(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     }
 }
 
-/// Calculate determinant of 3x3 matrix
+/// Calculate determinant of 3x3 matrix (used only for Mahalanobis).
+#[cfg(feature = "mahalanobis")]
 fn matrix_determinant_3x3(matrix: &[Vec<f64>]) -> f64 {
     matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
         - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])

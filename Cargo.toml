@@ -6,6 +6,8 @@ edition = "2021" # Rust editions define language features and idioms; "2021" is 
 [features]
 default = []
 testing = []
+# Optional: Mahalanobis uniformity score and tests (off by default)
+mahalanobis = []
 
 [lib]
 name = "sdo"

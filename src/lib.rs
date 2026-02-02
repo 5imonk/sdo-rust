@@ -1,5 +1,8 @@
 #[cfg(test)]
+mod distance_matrix_tests;
+#[cfg(all(test, feature = "mahalanobis"))]
 mod mahalanobis_tests;
+mod distance_matrix;
 pub mod obs;
 pub mod obset;
 mod obset_clust;

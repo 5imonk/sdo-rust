@@ -1,4 +1,4 @@
-use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -99,6 +99,21 @@ impl SDOstreamclust {
         let (predicted_label, outlier_score) = self.predict_impl(&point_vec);
 
         Ok((predicted_label, outlier_score))
+    }
+
+    /// Gibt die Positionen der aktiven Observer als NumPy-Array zurück (Modell für Label-Vorhersage).
+    pub fn get_active_observers(&self, py: Python<'_>) -> PyResult<Py<PyArray2<f64>>> {
+        self.sdostream.get_sdo().get_active_observers(py)
+    }
+
+    /// Gibt die Cluster-Labels der aktiven Observer zurück (-1 = kein Label/Outlier).
+    pub fn get_observer_labels(&self) -> Vec<i32> {
+        self.sdostream
+            .get_sdo()
+            .observers
+            .iter_observers(true)
+            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
+            .collect()
     }
 }
 

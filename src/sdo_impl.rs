@@ -16,8 +16,6 @@ use crate::utils::{compute_median, data_to_matrix, point_to_vec};
 pub struct SDO {
     // Observer-Set, sortiert nach observations (verwendet immer Brute-Force)
     pub(crate) observers: ObserverSet,
-    distance_metric: DistanceMetric,
-    minkowski_p: Option<f64>,
     rho: f64,
     #[pyo3(get, set)]
     pub(crate) x: usize,
@@ -36,17 +34,12 @@ impl SDO {
             _ => DistanceMetric::Euclidean,
         };
 
-        let mut instance = Self {
-            observers: ObserverSet::new(),
-            distance_metric,
-            minkowski_p,
+        let instance = Self {
+            observers: ObserverSet::new(distance_metric, minkowski_p),
             rho,
             x,
             k,
         };
-        instance
-            .observers
-            .set_tree_params(distance_metric, minkowski_p);
         instance
     }
 
@@ -129,10 +122,6 @@ impl SDO {
             .collect();
 
         // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
-        // ObserverSet wurde bereits in initialize() erstellt, aber wir müssen sicherstellen,
-        // dass die Parameter gesetzt sind
-        self.observers
-            .set_tree_params(self.distance_metric, self.minkowski_p);
         for (idx, observer_data) in observers_data.iter().enumerate() {
             let observer = Observer {
                 data: observer_data.clone(),
@@ -140,14 +129,13 @@ impl SDO {
                 time: 0.0,
                 age: data.len() as f64,
                 index: idx,
-                local_threshold: 0.0,
+                local_threshold: f64::INFINITY,
                 label_observations: HashMap::new(),
             };
             self.observers.insert(observer);
         }
 
         // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
-
         // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
         for data_point in data {
             // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
@@ -170,7 +158,7 @@ impl SDO {
             .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
     }
 
-    pub(crate) fn predict_impl(&self, point: &Vec<f64>) -> (f64, Vec<usize>) {
+    pub(crate) fn predict_impl(&self, point: &[f64]) -> (f64, Vec<usize>) {
         if self.observers.is_empty() {
             panic!("No observers found during prediction!");
         }
