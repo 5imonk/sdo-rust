@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
-use crate::utils::time_to_f64;
+use crate::utils::times_to_vec_batch;
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -86,27 +86,13 @@ impl SDOstreamclust {
             points_vec.push(row);
         }
 
-        let mut times_vec = Vec::with_capacity(rows);
-        if let Some(time_array) = time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() != rows {
-                return Err(PyErr::new::<PyValueError, _>(
-                    format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
-                ));
-            }
-            for i in 0..rows {
-                times_vec.push(time_slice[i]);
-            }
-        } else {
-            for i in 0..rows {
-                let t = time_to_f64(
-                    None,
-                    self.sdostream.get_use_explicit_time(),
-                    self.sdostream.get_data_points_processed() + i,
-                ).map_err(|e| e)?;
-                times_vec.push(t);
-            }
-        }
+        // Bestimme Zeiten für alle Punkte
+        let times_vec = times_to_vec_batch(
+            time,
+            rows,
+            self.sdostream.get_use_explicit_time(),
+            self.sdostream.get_data_points_processed(),
+        )?;
 
         let results = self.learn_impl(&points_vec, &times_vec);
 

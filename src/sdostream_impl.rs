@@ -7,7 +7,9 @@ use std::f64;
 
 use crate::obs::{NeighborInfo, Observer};
 use crate::sdo_impl::SDO;
-use crate::utils::{data_to_matrix, sample_random_matrix_uniform_unit, time_to_f64};
+use crate::utils::{
+    data_to_matrix, sample_random_matrix_uniform_unit, time_to_f64, times_to_vec_batch,
+};
 
 impl SDOstream {
     /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
@@ -122,28 +124,12 @@ impl SDOstream {
         }
 
         // Bestimme Zeiten für alle Punkte
-        let mut times_vec = Vec::with_capacity(rows);
-        if let Some(time_array) = time {
-            let time_slice = time_array.as_array();
-            if time_slice.len() != rows {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
-                ));
-            }
-            for i in 0..rows {
-                times_vec.push(time_slice[i]);
-            }
-        } else {
-            // Auto-generiere Zeiten basierend auf use_explicit_time
-            for i in 0..rows {
-                let current_time = time_to_f64(
-                    None,
-                    self.use_explicit_time,
-                    self.data_points_processed + i,
-                )?;
-                times_vec.push(current_time);
-            }
-        }
+        let times_vec = times_to_vec_batch(
+            time,
+            rows,
+            self.use_explicit_time,
+            self.data_points_processed,
+        )?;
 
         let results = self.learn_impl(&points_vec, &times_vec);
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();

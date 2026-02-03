@@ -117,9 +117,37 @@ pub fn time_to_f64(
     }
 }
 
-/// Converts 1D time array to Vec<f64>
-pub fn times_to_vec(times: PyReadonlyArray1<f64>) -> Vec<f64> {
-    times.as_array().to_vec()
+/// Konvertiert optionales Zeit-Array zu Vec<f64> für Batch-Verarbeitung.
+/// Wenn kein Zeit-Array gegeben ist, werden Zeiten automatisch generiert basierend auf use_explicit_time.
+pub fn times_to_vec_batch(
+    time: Option<PyReadonlyArray1<f64>>,
+    rows: usize,
+    use_explicit_time: bool,
+    data_points_processed: usize,
+) -> Result<Vec<f64>, PyErr> {
+    let mut times_vec = Vec::with_capacity(rows);
+    if let Some(time_array) = time {
+        let time_slice = time_array.as_array();
+        if time_slice.len() != rows {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
+            ));
+        }
+        for i in 0..rows {
+            times_vec.push(time_slice[i]);
+        }
+    } else {
+        // Auto-generiere Zeiten basierend auf use_explicit_time
+        for i in 0..rows {
+            let current_time = time_to_f64(
+                None,
+                use_explicit_time,
+                data_points_processed + i,
+            )?;
+            times_vec.push(current_time);
+        }
+    }
+    Ok(times_vec)
 }
 
 /// Generates a random matrix with normally distributed values using rand_distr
