@@ -80,7 +80,7 @@ def main():
 
     model = SDOclust(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
     model.learn(x)
-    y_pred = np.array([model.predict(x[i : i + 1, :], False)[0] for i in range(len(x))])
+    y_pred = np.array([model.predict(x[i : i + 1, :])[0] for i in range(len(x))])
     obs_points, obs_labels = get_observers_and_labels(model)
 
     ari = adjusted_rand_score(y_true, y_pred)
