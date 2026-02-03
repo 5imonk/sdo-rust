@@ -112,17 +112,17 @@ impl SDOstreamclust {
 
         Python::with_gil(|py| {
             if rows == 1 {
-                let t = pyo3::types::PyTuple::new(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                let t = pyo3::types::PyTuple::new_bound(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
                 Ok(t.into_py(py))
             } else {
                 let list: Vec<Py<PyAny>> = results
                     .iter()
                     .map(|(l, s)| {
-                        let t = pyo3::types::PyTuple::new(py, [l.into_py(py), s.into_py(py)]);
+                        let t = pyo3::types::PyTuple::new_bound(py, [l.into_py(py), s.into_py(py)]);
                         t.into_py(py)
                     })
                     .collect();
-                let py_list = pyo3::types::PyList::new(py, list);
+                let py_list = pyo3::types::PyList::new_bound(py, list);
                 Ok(py_list.into_py(py))
             }
         })
@@ -143,17 +143,17 @@ impl SDOstreamclust {
 
         Python::with_gil(|py| {
             if rows == 1 {
-                let t = pyo3::types::PyTuple::new(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                let t = pyo3::types::PyTuple::new_bound(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
                 Ok(t.into_py(py))
             } else {
                 let list: Vec<Py<PyAny>> = results
                     .iter()
                     .map(|(l, s, _)| {
-                        let t = pyo3::types::PyTuple::new(py, [l.into_py(py), s.into_py(py)]);
+                        let t = pyo3::types::PyTuple::new_bound(py, [l.into_py(py), s.into_py(py)]);
                         t.into_py(py)
                     })
                     .collect();
-                let py_list = pyo3::types::PyList::new(py, list);
+                let py_list = pyo3::types::PyList::new_bound(py, list);
                 Ok(py_list.into_py(py))
             }
         })

@@ -218,15 +218,18 @@ print_observers_csv(all_observers, block_num=0, time=t[0], output_file=os.path.j
 chunk = x[:first_block_size, :]
 chunk_time = t[:first_block_size]
 
-# Punkt-für-Punkt verarbeiten statt fit_predict
-for i in range(len(chunk)):
-    point = chunk[i:i+1, :]  # 2D Array für learn()
-    time_val = chunk_time[i]
-    time_array = np.array([time_val], dtype=np.float64)
-    
-    label, score = classifier.learn(point, time=time_array)
-    all_predic.append(label)
-    all_scores.append(score)
+# Batch-Verarbeitung für den ersten Block
+time_array = chunk_time.astype(np.float64)
+results = classifier.learn(chunk, time=time_array)
+if isinstance(results, tuple):
+    # Einzelner Punkt (sollte nicht passieren hier)
+    all_predic.append(results[0])
+    all_scores.append(results[1])
+else:
+    # Liste von (label, score) Tupeln
+    for label, score in results:
+        all_predic.append(label)
+        all_scores.append(score)
 
 # Observer-Informationen nach dem ersten Block
 obs_points, obs_labels = get_observers_info(classifier)
@@ -243,15 +246,18 @@ for i in range(first_block_size, x.shape[0], block_size):
     chunk = x[i:i + block_size, :]
     chunk_time = t[i:i + block_size]
     
-    # Punkt-für-Punkt verarbeiten
-    for j in range(len(chunk)):
-        point = chunk[j:j+1, :]  # 2D Array für learn()
-        time_val = chunk_time[j]
-        time_array = np.array([time_val], dtype=np.float64)
-        
-        label, score = classifier.learn(point, time=time_array)
-        all_predic.append(label)
-        all_scores.append(score)
+    # Batch-Verarbeitung für diesen Block
+    time_array = chunk_time.astype(np.float64)
+    results = classifier.learn(chunk, time=time_array)
+    if isinstance(results, tuple):
+        # Einzelner Punkt
+        all_predic.append(results[0])
+        all_scores.append(results[1])
+    else:
+        # Liste von (label, score) Tupeln
+        for label, score in results:
+            all_predic.append(label)
+            all_scores.append(score)
     
     # Observer-Informationen nach jedem Block
     obs_points, obs_labels = get_observers_info(classifier)

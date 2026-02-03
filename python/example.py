@@ -175,18 +175,17 @@ def example_sdostream():
         ([3.2, 3.2], "Normal"),
     ]
     
-    for i, (point, label) in enumerate(streaming_points, 1):
-        point_2d = np.array([point], dtype=np.float64)
-        
-        # Score vor Verarbeitung
-        score_before = sdostream.predict(point_2d)
-        
-        # Verarbeite Punkt (Modell passt sich an)
-        sdostream.learn(point_2d)
-        
-        # Score nach Verarbeitung
-        score_after = sdostream.predict(point_2d)
-        
+    # Batch-Vorhersage für alle Punkte vor Verarbeitung
+    points_array = np.array([p[0] for p in streaming_points], dtype=np.float64)
+    scores_before = sdostream.predict_batch(points_array)
+    
+    # Batch-Learn für alle Punkte
+    scores_after_batch = sdostream.learn_batch(points_array)
+    
+    # Zeige Ergebnisse
+    for i, ((point, label), score_before, score_after) in enumerate(
+        zip(streaming_points, scores_before, scores_after_batch), 1
+    ):
         print(f"  {i}. {label:8}: [{point[0]:5.1f}, {point[1]:5.1f}] "
               f"→ Score: {score_before:.4f} → {score_after:.4f}")
     
@@ -244,10 +243,10 @@ def example_comparison():
     print("\n3. SDOstream (Streaming Outlier Detection):")
     sdostream = SDOstream(k=15, x=5, t_fading=10.0, data=data)
     
-    # Simuliere Streaming: Verarbeite einige Punkte
-    for point in data[::5]:  # Jeden 5. Punkt
-        point_2d = point.reshape(1, -1)
-        sdostream.learn(point_2d)
+    # Simuliere Streaming: Verarbeite einige Punkte mit Batch-API (learn unterstützt jetzt automatisch Batches)
+    streaming_data = data[::5]  # Jeden 5. Punkt
+    if len(streaming_data) > 0:
+        sdostream.learn(streaming_data)
     
     sdostream_score = sdostream.predict(test_point)
     print(f"   Score: {sdostream_score:.4f}")

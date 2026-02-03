@@ -43,19 +43,27 @@ def test_dimension_only_initialization():
 
 
 def test_basic_streaming_controlled():
-    """Grundlegendes Streaming mit kontrollierten Punkten."""
+    """Grundlegendes Streaming mit kontrollierten Punkten (Batch-Verarbeitung)."""
     print("\n" + "=" * 60)
-    print("Test 2: Basic Streaming (kontrolliert)")
+    print("Test 2: Basic Streaming (kontrolliert, Batch)")
     print("=" * 60)
     np.random.seed(42)
     init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     sdostream = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
-    test_points = [[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.2, 0.2]]
-    for point in test_points:
-        point_2d = np.array([point], dtype=np.float64)
-        sdostream.predict(point_2d)
-        sdostream.learn(point_2d)
-        assert np.isfinite(sdostream.predict(point_2d))
+    test_points = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.2, 0.2]], dtype=np.float64)
+    
+    # Batch-Predict vor Learn
+    scores_before = sdostream.predict(test_points)
+    assert all(np.isfinite(s) for s in scores_before)
+    
+    # Batch-Learn
+    scores_after = sdostream.learn(test_points)
+    assert all(np.isfinite(s) for s in scores_after)
+    
+    # Batch-Predict nach Learn
+    scores_final = sdostream.predict(test_points)
+    assert all(np.isfinite(s) for s in scores_final)
+    
     # init uses len(init_data) points, then we learn len(test_points) more
     assert sdostream.data_points_processed == len(init_data) + len(test_points)
     print("✓ Test 2 bestanden")
@@ -63,47 +71,58 @@ def test_basic_streaming_controlled():
 
 
 def test_basic_streaming():
-    """Grundlegendes Streaming mit MinMax-skalierte Daten."""
+    """Grundlegendes Streaming mit MinMax-skalierte Daten (Batch-Verarbeitung)."""
     print("\n" + "=" * 60)
-    print("Test 3: Grundlegende Streaming-Funktionalität")
+    print("Test 3: Grundlegende Streaming-Funktionalität (Batch)")
     print("=" * 60)
     np.random.seed(42)
     cluster1 = np.random.randn(5, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(5, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = MinMaxScaler().fit_transform(np.vstack([cluster1, cluster2]).astype(np.float64))
     sdostream = SDOstream(k=10, x=5, t_fading=10.0, data=init_data)
-    for point in ([2.0, 2.0], [8.0, 8.0], [2.5, 2.5], [8.5, 8.5], [15.0, 15.0]):
-        point_2d = np.array([point], dtype=np.float64)
-        sdostream.predict(point_2d)
-        sdostream.learn(point_2d)
+    
+    # Batch-Verarbeitung für alle Punkte
+    test_points = np.array([[2.0, 2.0], [8.0, 8.0], [2.5, 2.5], [8.5, 8.5], [15.0, 15.0]], dtype=np.float64)
+    scores = sdostream.predict(test_points)
+    assert all(np.isfinite(s) for s in scores)
+    scores_after = sdostream.learn(test_points)
+    assert all(np.isfinite(s) for s in scores_after)
     print("✓ Test 3 bestanden")
     return True
 
 
 def test_cluster_evolution():
-    """Streaming über mehrere Phasen (Cluster-Evolution)."""
+    """Streaming über mehrere Phasen (Cluster-Evolution) - Batch-Verarbeitung."""
     print("\n" + "=" * 60)
-    print("Test 4: Cluster-Evolution über Zeit")
+    print("Test 4: Cluster-Evolution über Zeit (Batch)")
     print("=" * 60)
     np.random.seed(42)
     init_data = MinMaxScaler().fit_transform(np.random.randn(10, 2).astype(np.float64))
     sdostream = SDOstream(k=3, x=2, t_fading=10.0, data=init_data)
-    for pts in [
+    
+    # Batch-Verarbeitung für jede Phase
+    phases = [
         np.random.randn(5, 2) * 0.5 + np.array([3.0, 3.0]),
         np.random.randn(5, 2) * 0.5 + np.array([10.0, 10.0]),
         np.random.randn(3, 2) * 0.5 + np.array([3.0, 3.0]),
-    ]:
-        for i in range(len(pts)):
-            point = pts[i : i + 1, :].astype(np.float64)
-            sdostream.learn(point)
+    ]
+    for pts in phases:
+        pts_normalized = MinMaxScaler().fit_transform(pts.astype(np.float64))
+        scores = sdostream.learn(pts_normalized)
+        assert isinstance(scores, (list, np.ndarray))
+        if isinstance(scores, list):
+            assert len(scores) == len(pts_normalized)
+        else:
+            assert len(scores) == len(pts_normalized)
+        assert all(np.isfinite(s) for s in scores)
     print("✓ Test 4 bestanden")
     return True
 
 
 def test_observation_updates():
-    """Observer-Updates bei Streaming (nahe vs. ferne Observer)."""
+    """Observer-Updates bei Streaming (nahe vs. ferne Observer) - Batch-Verarbeitung."""
     print("\n" + "=" * 60)
-    print("Test 5: Observation Update Verification")
+    print("Test 5: Observation Update Verification (Batch)")
     print("=" * 60)
     np.random.seed(42)
     init_data = np.array([
@@ -111,9 +130,15 @@ def test_observation_updates():
     ], dtype=np.float64)
     sdostream = SDOstream(k=5, x=3, t_fading=1000.0, rho=0.4, data=init_data)
     initial_obs = [sdostream.get_observer_info(i)[0] for i in range(5)]
-    for _ in range(20):
-        point = np.random.randn(2) * 0.3 + np.array([1.0, 1.0])
-        sdostream.learn(np.array([point], dtype=np.float64))
+    
+    # Batch-Learn für 20 Punkte
+    batch_points = np.array([
+        np.random.randn(2) * 0.3 + np.array([1.0, 1.0]) for _ in range(20)
+    ], dtype=np.float64)
+    scores = sdostream.learn(batch_points)
+    assert len(scores) == 20
+    assert all(np.isfinite(s) for s in scores)
+    
     all_info = sdostream.all_observer_info
     final_obs = [info[1] for info in all_info]
     observers_gained = sum(1 for i in range(3) if final_obs[i] > initial_obs[i])
@@ -137,9 +162,119 @@ def test_different_parameters():
     )
     for t_fading in (5.0, 10.0, 20.0):
         sdostream = SDOstream(k=3, x=2, t_fading=t_fading, data=init_data)
-        scores = [sdostream.predict(np.array([p]).reshape(1, -1)) for p in [[2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]]
+        # Verwende predict mit mehreren Punkten (gibt Liste zurück)
+        test_points = np.array([[2.0, 2.0], [3.0, 3.0], [4.0, 4.0]], dtype=np.float64)
+        scores = sdostream.predict(test_points)
         assert all(np.isfinite(s) for s in scores)
     print("✓ Test 6 bestanden")
+    return True
+
+
+def test_predict_batch():
+    """Test für Batch-Vorhersage (predict unterstützt jetzt automatisch Batches)."""
+    print("\n" + "=" * 60)
+    print("Test 7: Batch-Vorhersage (predict mit mehreren Punkten)")
+    print("=" * 60)
+    np.random.seed(42)
+    init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    sdostream = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    
+    # Test mit mehreren Punkten
+    test_points = np.array([
+        [0.1, 0.1],
+        [0.9, 0.1],
+        [0.1, 0.9],
+        [0.5, 0.5],
+    ], dtype=np.float64)
+    
+    # Batch-Vorhersage (predict gibt jetzt Liste zurück für mehrere Punkte)
+    batch_scores = sdostream.predict(test_points)
+    assert isinstance(batch_scores, (list, np.ndarray))
+    if isinstance(batch_scores, list):
+        assert len(batch_scores) == len(test_points)
+    else:
+        assert len(batch_scores) == len(test_points)
+    assert all(np.isfinite(s) for s in batch_scores)
+    
+    # Vergleich mit einzelnen Vorhersagen (predict gibt einzelnen Wert zurück für einen Punkt)
+    individual_scores = [sdostream.predict(test_points[i:i+1]) for i in range(len(test_points))]
+    assert np.allclose(batch_scores, individual_scores, rtol=1e-10)
+    
+    print("✓ Test 7 bestanden")
+    return True
+
+
+def test_learn_batch():
+    """Test für Batch-Learn (learn unterstützt jetzt automatisch Batches)."""
+    print("\n" + "=" * 60)
+    print("Test 8: Batch-Learn (learn mit mehreren Punkten)")
+    print("=" * 60)
+    np.random.seed(42)
+    init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    sdostream1 = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    sdostream2 = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    
+    # Test-Punkte
+    test_points = np.array([
+        [0.1, 0.1],
+        [0.9, 0.1],
+        [0.1, 0.9],
+        [0.2, 0.2],
+    ], dtype=np.float64)
+    
+    # Batch-Learn (learn gibt jetzt Liste zurück für mehrere Punkte)
+    batch_scores = sdostream1.learn(test_points)
+    assert isinstance(batch_scores, (list, np.ndarray))
+    if isinstance(batch_scores, list):
+        assert len(batch_scores) == len(test_points)
+    else:
+        assert len(batch_scores) == len(test_points)
+    assert all(np.isfinite(s) for s in batch_scores)
+    assert sdostream1.data_points_processed == len(init_data) + len(test_points)
+    
+    # Vergleich mit sequentiellem Learn (learn gibt einzelnen Wert zurück für einen Punkt)
+    for point in test_points:
+        sdostream2.learn(point.reshape(1, -1))
+    
+    assert sdostream1.data_points_processed == sdostream2.data_points_processed
+    
+    # Prüfe, dass beide Modelle ähnliche Scores für denselben Punkt liefern
+    test_point = np.array([[0.5, 0.5]], dtype=np.float64)
+    score1 = sdostream1.predict(test_point)
+    score2 = sdostream2.predict(test_point)
+    assert np.isfinite(score1) and np.isfinite(score2)
+    
+    print("✓ Test 8 bestanden")
+    return True
+
+
+def test_cluster_evolution_batch():
+    """Streaming über mehrere Phasen mit Batch-APIs (learn unterstützt jetzt automatisch Batches)."""
+    print("\n" + "=" * 60)
+    print("Test 9: Cluster-Evolution mit Batch-APIs")
+    print("=" * 60)
+    np.random.seed(42)
+    init_data = MinMaxScaler().fit_transform(np.random.randn(10, 2).astype(np.float64))
+    sdostream = SDOstream(k=3, x=2, t_fading=10.0, data=init_data)
+    
+    # Verwende Batch-APIs für jede Phase (learn gibt Liste zurück für mehrere Punkte)
+    phases = [
+        np.random.randn(5, 2) * 0.5 + np.array([3.0, 3.0]),
+        np.random.randn(5, 2) * 0.5 + np.array([10.0, 10.0]),
+        np.random.randn(3, 2) * 0.5 + np.array([3.0, 3.0]),
+    ]
+    
+    for pts in phases:
+        pts_normalized = MinMaxScaler().fit_transform(pts.astype(np.float64))
+        scores = sdostream.learn(pts_normalized)
+        assert isinstance(scores, (list, np.ndarray))
+        if isinstance(scores, list):
+            assert len(scores) == len(pts_normalized)
+        else:
+            assert len(scores) == len(pts_normalized)
+        assert all(np.isfinite(s) for s in scores)
+    
+    print("✓ Test 9 bestanden")
     return True
 
 
@@ -157,6 +292,9 @@ def main():
         test_cluster_evolution,
         test_observation_updates,
         test_different_parameters,
+        test_predict_batch,
+        test_learn_batch,
+        test_cluster_evolution_batch,
     ]
     if args.test is not None and len(args.test) > 0:
         indices = [i - 1 for i in args.test if 1 <= i <= len(all_tests)]

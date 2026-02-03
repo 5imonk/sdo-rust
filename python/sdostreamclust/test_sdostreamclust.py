@@ -38,11 +38,28 @@ def test_sdostreamclust_integration():
     )
     cluster1_points = np.random.randn(5, 2) * 0.5 + np.array([0, 0])
     cluster2_points = np.random.randn(5, 2) * 0.5 + np.array([3, 3])
-    for point in list(cluster1_points) + list(cluster2_points):
-        label, score = sdostreamclust.learn(point.reshape(1, -1))
-        assert np.isfinite(score)
-    label1, score1 = sdostreamclust.predict(np.array([[0.1, 0.1]], dtype=np.float64))
-    label2, score2 = sdostreamclust.predict(np.array([[3.1, 3.1]], dtype=np.float64))
+    all_points = np.vstack([cluster1_points, cluster2_points])
+    # Batch-Learn für alle Punkte
+    results = sdostreamclust.learn(all_points)
+    if isinstance(results, tuple):
+        # Einzelner Punkt - sollte nicht passieren hier
+        assert np.isfinite(results[1])
+    else:
+        # Liste von (label, score) Tupeln
+        assert len(results) == len(all_points)
+        for label, score in results:
+            assert np.isfinite(score)
+    # Batch-Predict für beide Test-Punkte
+    test_points = np.array([[0.1, 0.1], [3.1, 3.1]], dtype=np.float64)
+    predictions = sdostreamclust.predict(test_points)
+    if isinstance(predictions, tuple):
+        # Einzelner Punkt
+        label1, score1 = predictions
+        label2, score2 = predictions
+    else:
+        # Liste von (label, score) Tupeln
+        label1, score1 = predictions[0]
+        label2, score2 = predictions[1]
     assert (label1 >= 0 or label1 == -1) and (label2 >= 0 or label2 == -1)
     assert np.isfinite(score1) and np.isfinite(score2)
     print("✓ Test 1 bestanden")
@@ -50,9 +67,9 @@ def test_sdostreamclust_integration():
 
 
 def test_basic_streaming_clustering():
-    """SDOstreamclust: Grundlegendes Streaming-Clustering."""
+    """SDOstreamclust: Grundlegendes Streaming-Clustering (Batch-Verarbeitung)."""
     print("\n" + "=" * 60)
-    print("Test 2: Grundlegende Streaming-Clustering")
+    print("Test 2: Grundlegende Streaming-Clustering (Batch)")
     print("=" * 60)
     np.random.seed(42)
     cluster1 = np.random.randn(5, 2) * 0.5 + np.array([2.0, 2.0])
@@ -63,10 +80,26 @@ def test_basic_streaming_clustering():
         chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
         data=init_data,
     )
-    for point in ([2.0, 2.0], [8.0, 8.0], [2.5, 2.5], [8.5, 8.5], [15.0, 15.0]):
-        point_2d = np.array([point], dtype=np.float64)
-        model.predict(point_2d)
-        model.learn(point_2d)
+    
+    # Batch-Verarbeitung für alle Punkte
+    test_points = np.array([[2.0, 2.0], [8.0, 8.0], [2.5, 2.5], [8.5, 8.5], [15.0, 15.0]], dtype=np.float64)
+    predictions = model.predict(test_points)
+    if isinstance(predictions, tuple):
+        # Einzelner Punkt (sollte nicht passieren)
+        assert len(test_points) == 1
+    else:
+        # Liste von (label, score) Tupeln
+        assert len(predictions) == len(test_points)
+    
+    results = model.learn(test_points)
+    if isinstance(results, tuple):
+        # Einzelner Punkt (sollte nicht passieren)
+        assert len(test_points) == 1
+    else:
+        # Liste von (label, score) Tupeln
+        assert len(results) == len(test_points)
+        for label, score in results:
+            assert np.isfinite(score)
     print("✓ Test 2 bestanden")
     return True
 
@@ -90,8 +123,16 @@ def test_cluster_evolution():
         np.random.randn(3, 2) * 0.5 + np.array([3.0, 3.0]),
     ]:
         pts = scaler.transform(pts)
-        for i in range(len(pts)):
-            model.learn(pts[i : i + 1, :])
+        # Batch-Learn für alle Punkte in dieser Phase
+        results = model.learn(pts)
+        if isinstance(results, tuple):
+            # Einzelner Punkt
+            assert np.isfinite(results[1])
+        else:
+            # Liste von (label, score) Tupeln
+            assert len(results) == len(pts)
+            for label, score in results:
+                assert np.isfinite(score)
     print("✓ Test 3 bestanden")
     return True
 

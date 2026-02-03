@@ -144,11 +144,23 @@ for i in range(0, x.shape[0], block_size):
     chunk = x[i:i + block_size, :]
     chunk_time = t[i:i + block_size] if len(t) > 0 else None
     
-    # Direkter Punkt-Streaming ohne Vorhersage
+    # Batch-Verarbeitung (kann auch einzelne Punkte sein)
     try:
-        label, score = classifier.learn(chunk[0:1])  # Process first point in chunk
-        all_predic.append(label)
-        all_scores.append(score)
+        if chunk_time is not None and len(chunk_time) > 0:
+            time_array = chunk_time.astype(np.float64)
+            results = classifier.learn(chunk, time=time_array)
+        else:
+            results = classifier.learn(chunk)
+        
+        if isinstance(results, tuple):
+            # Einzelner Punkt
+            all_predic.append(results[0])
+            all_scores.append(results[1])
+        else:
+            # Liste von (label, score) Tupeln
+            for label, score in results:
+                all_predic.append(label)
+                all_scores.append(score)
     except Exception as e:
         print(f"Error processing point {i}: {e}")
         all_predic.append(-1)
