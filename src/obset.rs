@@ -434,56 +434,25 @@ impl ObserverSet {
         }
     }
 
-    /// Find k nearest observer distances
-    /// Now uses unified search method for optimization
-    /// Returns distances to k nearest observers to the query point
-    pub fn search_k_nearest_distances(
-        &self,
-        query_point: &[f64],
-        k: usize,
-        active: bool,
-    ) -> Vec<f64> {
-        let (neighbors, _) = self.search_neighbors_unified(query_point, k, active);
-        neighbors.iter().map(|n| n.distance).collect()
-    }
-
-    /// Find k nearest observer indices (not just distances)
-    /// Now uses unified search method for optimization
-    /// Returns indices of k nearest observers to the query point
-    pub fn search_k_nearest_indices(
-        &self,
-        query_point: &[f64],
-        k: usize,
-        active: bool,
-    ) -> Vec<usize> {
-        let (neighbors, _) = self.search_neighbors_unified(query_point, k, active);
-        neighbors.iter().map(|n| n.index).collect()
-    }
-
-    /// Single-pass unified search returning neighbor info and active count
-    /// Optimizes by tracking k-nearest neighbors during iteration with worst candidate replacement
-    /// Returns (all_neighbors, active_neighbors) where:
-    /// - all_neighbors: k-nearest neighbors regardless of active status
+    /// Returns (active_neighbors, all_neighbors) where:
     /// - active_neighbors: k-nearest active neighbors only
+    /// - all_neighbors: k-nearest neighbors regardless of active status, only if learn is set and true, otherwise None
     pub fn search_neighbors_unified(
         &self,
         query_point: &[f64],
         k: usize,
-        active_only: bool,
-    ) -> (Vec<NeighborInfo>, Vec<NeighborInfo>) {
-        let mut nearest = Vec::with_capacity(k);
+        learn: Option<bool>,
+    ) -> (Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         let mut nearest_active = Vec::with_capacity(k);
-        let total_observers = self.observers_by_index.len();
-
-        // Handle edge case: k = 0
-        if k == 0 {
-            panic!("k must be greater than 0 for neighbor search.");
-        }
-
-        // Handle edge case: empty observer set
-        if total_observers == 0 {
-            panic!("ObserverSet is empty - cannot search for neighbors.");
-        }
+        let mut nearest_all = if let Some(flag) = learn {
+            if flag {
+                Some(Vec::with_capacity(k))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Helper function to update k-nearest vectors with worst candidate replacement
         let update_k_nearest = |candidates: &mut Vec<NeighborInfo>, neighbor_info: NeighborInfo| {
@@ -515,9 +484,9 @@ impl ObserverSet {
             // Determine active status from position in sorted order
             let is_active = position < self.num_active;
 
-            // Skip if only active observers requested and this one is inactive
-            if active_only && !is_active {
-                continue;
+            // Break if learn is false or not set and this one is inactive
+            if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
+                break;
             }
 
             // Compute distance once
@@ -534,9 +503,11 @@ impl ObserverSet {
                 is_active,
             };
 
-            // Update nearest (all observers if not active_only)
-            if !active_only {
-                update_k_nearest(&mut nearest, neighbor_info.clone());
+            // Update nearest (all observers if learn is Some(true))
+            if let Some(true) = learn {
+                if let Some(ref mut all_vec) = nearest_all {
+                    update_k_nearest(all_vec, neighbor_info.clone());
+                }
             }
 
             // Update nearest_active (only active observers)
@@ -545,7 +516,18 @@ impl ObserverSet {
             }
         }
 
-        (nearest, nearest_active)
+        (nearest_active, nearest_all)
+    }
+
+    /// Distanz von einem Punkt zu einem Observer (für Wiederverwendung in SDOstream Step 4)
+    pub(crate) fn distance_from_point(&self, point: &[f64], observer_index: usize) -> Option<f64> {
+        let observer = self.observers_by_index.get(&observer_index)?;
+        Some(compute_distance(
+            &observer.data,
+            point,
+            self.distance_metric,
+            self.minkowski_p,
+        ))
     }
 
     /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste

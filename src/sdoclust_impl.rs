@@ -70,11 +70,9 @@ impl SDOclust {
     }
 
     /// Berechnet das Cluster-Label für einen Datenpunkt
-    pub fn predict(
-        &self,
-        point: PyReadonlyArray2<f64>,
-        outlier_score_flag: bool,
-    ) -> PyResult<(i32, f64)> {
+    /// Returns (label, outlier_score)
+    #[pyo3(signature = (point))]
+    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
         if self.sdo.observers.is_empty() {
             return Ok((-1, f64::NAN)); // Kein Label (Outlier)
         }
@@ -83,12 +81,8 @@ impl SDOclust {
         let point_vec = point_to_vec(point);
 
         // Rufe die interne Vorhersagemethode auf
-        let label = self.predict_impl(&point_vec);
+        let (label, outlier_score) = self.predict_impl(&point_vec, None);
 
-        let (outlier_score, _nearest_active_indices) = match outlier_score_flag {
-            true => self.sdo.predict_impl(&point_vec),
-            false => (f64::NAN, Vec::new()),
-        };
         Ok((label, outlier_score))
     }
 
@@ -141,16 +135,8 @@ impl SDOclust {
         );
     }
 
-    pub fn predict_impl(&self, point: &[f64]) -> i32 {
-        if self.sdo.observers.is_empty() {
-            return -1; // Kein Label (Outlier)
-        }
-
-        // Finde die x nächsten Nachbarn unter den aktiven Observers
-        let (_, active_neighbors) = self
-            .sdo
-            .observers
-            .search_neighbors_unified(point, self.sdo.x, true);
+    pub fn predict_impl(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
+        let (median, active_neighbors, _all_neighbors_opt) = self.sdo.predict_impl(point, learn);
         let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Zähle die Häufigkeit der Labels
@@ -165,9 +151,9 @@ impl SDOclust {
 
         // Gib das häufigste Label zurück (konvertiere zu i32 für Python-API)
         if let Some((&most_common_label, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
-            most_common_label as i32
+            (most_common_label as i32, median)
         } else {
-            -1 // Kein Label gefunden (Outlier)
+            (-1, median) // Kein Label gefunden (Outlier)
         }
     }
 }

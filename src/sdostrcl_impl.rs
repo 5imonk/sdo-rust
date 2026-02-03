@@ -2,6 +2,7 @@ use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
 use crate::utils::{point_to_vec, time_to_f64};
 
@@ -96,7 +97,8 @@ impl SDOstreamclust {
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
         let point_vec = point_to_vec(point);
 
-        let (predicted_label, outlier_score) = self.predict_impl(&point_vec);
+        let (predicted_label, outlier_score, _all_neighbors_opt) =
+            self.predict_impl(&point_vec, None);
 
         Ok((predicted_label, outlier_score))
     }
@@ -121,7 +123,8 @@ impl SDOstreamclust {
     /// Interner Zugriff auf mutable SDOstream
     pub fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
         // Verwende SDOstream für Modell-Erstellung (Sample, Observe, Clean)
-        let (median, nearest_active_indices) = self.sdostream.learn_impl(point, time);
+        let (median, active_neighbors, _all_neighbors_opt) = self.sdostream.learn_impl(point, time);
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Führe vollständiges Clustering durch (inkl. Thresholds, Connected Components, Label-Zuweisung, Fading)
         let fading = self.sdostream.get_fading();
@@ -138,12 +141,19 @@ impl SDOstreamclust {
         (predicted_label, median)
     }
 
-    pub fn predict_impl(&self, point: &Vec<f64>) -> (i32, f64) {
-        let (median, nearest_active_indices) = self.sdostream.predict_impl(point);
+    pub fn predict_impl(
+        &self,
+        point: &[f64],
+        learn: Option<bool>,
+    ) -> (i32, f64, Option<Vec<NeighborInfo>>) {
+        let point_vec: Vec<f64> = point.to_vec();
+        let (median, active_neighbors, all_neighbors_opt) =
+            self.sdostream.predict_impl(&point_vec, learn);
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         let predicted_label = self.compute_label(&nearest_active_indices);
 
-        (predicted_label, median)
+        (predicted_label, median, all_neighbors_opt)
     }
 }
 

@@ -5,7 +5,7 @@ use rand::thread_rng;
 use std::collections::HashMap;
 use std::f64;
 
-use crate::obs::Observer;
+use crate::obs::{NeighborInfo, Observer};
 use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
 use crate::utils::{compute_median, data_to_matrix, point_to_vec};
@@ -81,7 +81,7 @@ impl SDO {
         let point_vec = point_to_vec(point);
 
         // Rufe die interne Vorhersagemethode auf
-        let (median, _nearest_active_indices) = self.predict_impl(&point_vec);
+        let (median, _active_neighbors, _all_neighbors_opt) = self.predict_impl(&point_vec, None);
 
         Ok(median)
     }
@@ -139,9 +139,9 @@ impl SDO {
         // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
         for data_point in data {
             // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
-            let (neighbors, _) = self
-                .observers
-                .search_neighbors_unified(data_point, self.x, false);
+            let (neighbors, _) =
+                self.observers
+                    .search_neighbors_unified(data_point, self.x, Some(false));
             let nearest_indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
 
             // Erhöhe observations für jeden dieser Observer um 1
@@ -158,14 +158,19 @@ impl SDO {
             .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
     }
 
-    pub(crate) fn predict_impl(&self, point: &[f64]) -> (f64, Vec<usize>) {
+    pub(crate) fn predict_impl(
+        &self,
+        point: &[f64],
+        learn: Option<bool>,
+    ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         if self.observers.is_empty() {
             panic!("No observers found during prediction!");
         }
 
         // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
-        let (_all_neighbors, active_neighbors) =
-            self.observers.search_neighbors_unified(point, self.x, true);
+        let (active_neighbors, all_neighbors_opt) = self
+            .observers
+            .search_neighbors_unified(point, self.x, learn);
         let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
 
         if distances.is_empty() {
@@ -174,9 +179,7 @@ impl SDO {
 
         let median = compute_median(&distances);
 
-        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-
-        (median, nearest_active_indices)
+        (median, active_neighbors, all_neighbors_opt)
     }
 
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)

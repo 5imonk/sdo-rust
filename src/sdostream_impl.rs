@@ -5,11 +5,9 @@ use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::f64;
 
-use crate::obs::Observer;
+use crate::obs::{NeighborInfo, Observer};
 use crate::sdo_impl::SDO;
-use crate::utils::{
-    compute_median, data_to_matrix, point_to_vec, sample_random_matrix_uniform_unit, time_to_f64,
-};
+use crate::utils::{data_to_matrix, point_to_vec, sample_random_matrix_uniform_unit, time_to_f64};
 
 impl SDOstream {
     /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
@@ -119,7 +117,8 @@ impl SDOstream {
         // Bestimme Zeit basierend auf Initialisierungs-Strategie
         let current_time = time_to_f64(time, self.use_explicit_time, self.data_points_processed)?;
 
-        let (median, _nearest_active_indices) = self.learn_impl(&point_vec, current_time);
+        let (median, _active_neighbors, _all_neighbors_opt) =
+            self.learn_impl(&point_vec, current_time);
 
         Ok(median)
     }
@@ -129,7 +128,8 @@ impl SDOstream {
     pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
         let point_vec: Vec<f64> = point_to_vec(point);
 
-        let (median, _nearest_active_indices) = self.predict_impl(&point_vec);
+        let (median, _active_neighbors, _all_neighbors_opt) =
+            self.predict_impl(&point_vec, Some(false));
 
         Ok(median)
     }
@@ -285,45 +285,101 @@ impl SDOstream {
         self.data_points_processed = data_points.len();
     }
 
-    pub(crate) fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (f64, Vec<usize>) {
-        // Schritt 1: Finde x-nächste Observer (verwende optimierte unified search mit active count)
+    pub(crate) fn learn_impl(
+        &mut self,
+        point: &Vec<f64>,
+        time: f64,
+    ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         let x = self.sdo.x;
 
-        // Schritt 1a: Finde alle Observer für learning
-        let (all_neighbors, active_neighbors) = self
-            .sdo
-            .observers
-            .search_neighbors_unified(&point, x, false);
-        let nearest_observer_indices: Vec<usize> = all_neighbors.iter().map(|n| n.index).collect();
+        // Schritt 1: Ersetzungen festlegen (nur markieren, noch nicht ausführen)
+        let mark = self.mark_replacements_impl(time);
 
-        let nearest_active_distances: Vec<f64> =
-            active_neighbors.iter().map(|n| n.distance).collect();
-        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-        let median = if !nearest_active_distances.is_empty() {
-            compute_median(&nearest_active_distances)
+        // Schritt 2: Predict – x nächste aktive Observer, Median
+        let (median, active_neighbors, all_neighbors_opt) =
+            self.sdo.predict_impl(point, Some(true));
+
+        // Schritt 3: Ersetzungen ausführen (markierte Observer ersetzen)
+        let new_index = if let Some((replace_idx, total_replacements)) = mark {
+            let ni = self.replace_observer_at(replace_idx, point, time);
+            self.last_replacement_time = time;
+            self.pending_replacements = total_replacements - 1;
+            ni
         } else {
-            f64::INFINITY
+            None
         };
 
-        // Schritt 2: Update Pω und Hω für alle Observer mit zeitbasiertem Exponential Moving Average
-        // Hω ← f^(ti - ti-1) · Hω + 1, Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
+        let replace_idx = mark.map(|(idx, _)| idx);
+
+        // Schritt 4: Fit – x nächste für Update (Wiederverwendung von all_neighbors aus Schritt 2)
+        let nearest_observer_indices = self.build_nearest_for_fit(
+            all_neighbors_opt.as_deref(),
+            replace_idx,
+            new_index,
+            point,
+            x,
+        );
         self.sdo.observers.update_observations_with_fading(
             &nearest_observer_indices,
             self.fading,
             time,
         );
-        // Increment data_points_processed für auto-increment Modus
         self.data_points_processed += 1;
 
-        // Schritt 3: Sampling - Lazy Replacement basierend auf verstrichener Zeit (Poisson-basiert)
-        self.sample_impl(&point, time);
-
-        (median, nearest_active_indices)
+        (median, active_neighbors, all_neighbors_opt)
     }
 
-    pub(crate) fn predict_impl(&self, point: &Vec<f64>) -> (f64, Vec<usize>) {
-        let (median, nearest_active_indices) = self.sdo.predict_impl(point);
-        (median, nearest_active_indices)
+    /// Schritt 1: Liefert (replace_idx, total_replacements) wenn eine Ersetzung fällig ist.
+    fn mark_replacements_impl(&self, time: f64) -> Option<(usize, usize)> {
+        let elapsed = time - self.last_replacement_time;
+        if elapsed < 0.0 {
+            panic!(
+                "Ungültige Zeit: current time muss größer oder gleich last_replacement_time sein"
+            );
+        }
+        let effective_sampling_interval = self.t_sampling / (self.k as f64);
+        let lambda_events = elapsed / effective_sampling_interval;
+        let num_replacements = self.sample_poisson(lambda_events);
+        let total_replacements = num_replacements + self.pending_replacements;
+        if total_replacements == 0 {
+            return None;
+        }
+        let worst_scores = self.sdo.observers.find_k_worst_normalized_scores(Some(1));
+        let (replace_idx, _) = worst_scores.first()?;
+        Some((*replace_idx, total_replacements))
+    }
+
+    /// Schritt 4-Hilfe: x nächste Indizes für Update aus all_neighbors (ohne Ersetzte, mit neuen).
+    fn build_nearest_for_fit(
+        &self,
+        all_neighbors: Option<&[crate::obs::NeighborInfo]>,
+        replace_idx: Option<usize>,
+        new_index: Option<usize>,
+        point: &[f64],
+        x: usize,
+    ) -> Vec<usize> {
+        let mut candidates: Vec<(usize, f64)> = all_neighbors
+            .unwrap_or(&[])
+            .iter()
+            .filter(|n| replace_idx != Some(n.index))
+            .map(|n| (n.index, n.distance))
+            .collect();
+        if let Some(ni) = new_index {
+            if let Some(d) = self.sdo.observers.distance_from_point(point, ni) {
+                candidates.push((ni, d));
+            }
+        }
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.into_iter().take(x).map(|(idx, _)| idx).collect()
+    }
+
+    pub(crate) fn predict_impl(
+        &self,
+        point: &Vec<f64>,
+        learn: Option<bool>,
+    ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
+        let (median, active_neighbors, all_neighbors_opt) = self.sdo.predict_impl(point, learn);
+        (median, active_neighbors, all_neighbors_opt)
     }
 
     /// Gibt fading zurück (für interne Verwendung)
@@ -353,9 +409,9 @@ impl SDOstream {
 }
 
 impl SDOstream {
-    /// Prüft und führt Ersetzungen basierend auf verstrichener Zeit durch (Lazy Replacement)
-    /// Verwendet Poisson-Verteilung für die Anzahl der Ersetzungen
-    /// Funktioniert sowohl für einzelne Punkte als auch für Batches
+    /// Prüft und führt Ersetzungen basierend auf verstrichener Zeit durch (Lazy Replacement).
+    /// Wird nicht mehr von learn_impl aufgerufen (4-Schritte-Struktur); für Batch/API behalten.
+    #[allow(dead_code)]
     fn sample_impl(&mut self, point: &[f64], time: f64) -> Option<usize> {
         let elapsed = time - self.last_replacement_time;
 
@@ -434,32 +490,23 @@ impl SDOstream {
         }
     }
 
-    /// Ersetzt einen Observer basierend auf normalisierter Qualitätsmetrik P̃ω = Pω / Hω
-    fn replace_observer(&mut self, point: &[f64], time: f64) -> Option<usize> {
-        // Verwende die optimierte find_k_worst_normalized_scores Methode - O(1) statt O(n)
-        let worst_scores = self.sdo.observers.find_k_worst_normalized_scores(Some(1));
-        let (replace_idx, _score) = match worst_scores.first() {
-            Some((idx, score)) => (*idx, *score),
-            None => return None, // Keine Observer vorhanden
-        };
-
-        // Erstelle neuen Observer
-        // Für neue Observer: time sollte auf die aktuelle Zeit gesetzt werden
-        // Da wir hier keine Zeit haben, verwenden wir 0.0 (wird beim nächsten Update korrigiert)
+    /// Ersetzt einen Observer an einem gegebenen Index (Schritt 3 der 4-Schritte-Struktur).
+    fn replace_observer_at(
+        &mut self,
+        replace_idx: usize,
+        point: &[f64],
+        time: f64,
+    ) -> Option<usize> {
         let new_index = self.data_points_processed;
         let new_observer = Observer {
             data: point.to_vec(),
-            observations: 1.0, // Neuer Observer startet mit Pω = 1
-            time: time,        // Setze time auf aktuelle Zeit
-            age: 1.0,          // Neuer Observer startet mit Hω = 1
-            index: new_index as usize,
+            observations: 1.0,
+            time,
+            age: 1.0,
+            index: new_index,
             local_threshold: 0.0,
             label_observations: HashMap::new(),
         };
-
-        // Verwende SDO's replace_observer Methode - O(log n)
-        // replace() sollte immer erfolgreich sein, wenn remove() erfolgreich war
-        // Falls nicht, füge den neuen Observer trotzdem hinzu
         let new_observer_clone = Observer {
             data: new_observer.data.clone(),
             observations: new_observer.observations,
@@ -471,11 +518,18 @@ impl SDOstream {
         };
         let success = self.sdo.replace_observer(replace_idx, new_observer);
         if !success {
-            // Fallback: Füge den neuen Observer hinzu, auch wenn replace fehlgeschlagen ist
             self.sdo.observers.insert(new_observer_clone);
         }
-
         Some(new_index)
+    }
+
+    /// Ersetzt einen Observer basierend auf normalisierter Qualitätsmetrik P̃ω = Pω / Hω
+    /// (Legacy: findet den schlechtesten und ruft replace_observer_at auf.)
+    #[allow(dead_code)]
+    fn replace_observer(&mut self, point: &[f64], time: f64) -> Option<usize> {
+        let worst_scores = self.sdo.observers.find_k_worst_normalized_scores(Some(1));
+        let (replace_idx, _) = worst_scores.first()?;
+        self.replace_observer_at(*replace_idx, point, time)
     }
 }
 
