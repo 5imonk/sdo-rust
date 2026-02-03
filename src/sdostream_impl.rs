@@ -102,7 +102,7 @@ impl SDOstream {
             None => None,
         };
 
-        self.initialize_impl(dimension, data_vec.as_ref(), start_time)?;
+        self.initialize_impl(dimension, data_vec.as_ref(), start_time);
 
         Ok(())
     }
@@ -228,9 +228,7 @@ impl SDOstream {
         dimension: Option<usize>,
         data: Option<&Vec<Vec<f64>>>,
         time: f64,
-    ) -> PyResult<()> {
-        // Implementation moved to initialize() method above
-
+    ) {
         // Determine what data to use
         let data_points = match (data, dimension) {
             // Case 1: User provided data
@@ -240,12 +238,12 @@ impl SDOstream {
                     // Check if all points have correct dimension
                     for (i, point) in existing_data.iter().enumerate() {
                         if point.len() != dim {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            panic!(
                                 "Point {} has dimension {} but expected {}",
                                 i,
                                 point.len(),
-                                dim
-                            )));
+                                dim,
+                            );
                         }
                     }
                 }
@@ -256,7 +254,10 @@ impl SDOstream {
             // Case 3: No data and no dimension → initialize empty
             (None, None) => {
                 self.sdo.observers.set_num_active(0);
-                return Ok(());
+                self.last_replacement_time = time;
+                self.pending_replacements = 0;
+                self.data_points_processed = 0;
+                return;
             }
         };
 
@@ -282,8 +283,6 @@ impl SDOstream {
         self.last_replacement_time = time;
         self.pending_replacements = 0; // Keine ausstehenden Ersetzungen bei Initialisierung
         self.data_points_processed = data_points.len();
-
-        Ok(())
     }
 
     pub(crate) fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (f64, Vec<usize>) {
