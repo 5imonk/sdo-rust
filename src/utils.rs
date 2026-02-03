@@ -185,3 +185,42 @@ pub fn compute_median(values: &Vec<f64>) -> f64 {
         sorted_values[len / 2]
     }
 }
+
+/// Konvertiert einen Score-Vektor für Python: ein Wert wenn rows == 1, sonst Liste.
+/// Caller stellt sicher, dass scores.len() == rows.
+pub fn scores_single_or_list_to_py(
+    scores: &[f64],
+    rows: usize,
+    py: Python<'_>,
+) -> PyResult<PyObject> {
+    if rows == 1 {
+        Ok(scores[0].into_py(py))
+    } else {
+        Ok(scores.to_vec().into_py(py))
+    }
+}
+
+/// Konvertiert (label, score)-Ergebnisse für Python: ein Tupel wenn rows == 1, sonst Liste von Tupeln.
+/// Caller stellt sicher, dass results.len() == rows.
+pub fn label_score_results_to_py(
+    results: &[(i32, f64)],
+    rows: usize,
+    py: Python<'_>,
+) -> PyResult<PyObject> {
+    use pyo3::types::{PyList, PyTuple};
+    if rows == 1 {
+        let (label, score) = results[0];
+        let tuple = PyTuple::new_bound(py, [label.into_py(py), score.into_py(py)]);
+        Ok(tuple.into_py(py))
+    } else {
+        let list: Vec<pyo3::Py<pyo3::PyAny>> = results
+            .iter()
+            .map(|(label, score)| {
+                let tuple = PyTuple::new_bound(py, [label.into_py(py), score.into_py(py)]);
+                tuple.into_py(py)
+            })
+            .collect();
+        let py_list = PyList::new_bound(py, list);
+        Ok(py_list.into_py(py))
+    }
+}

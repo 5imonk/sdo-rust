@@ -8,7 +8,7 @@ use std::f64;
 use crate::obs::{NeighborInfo, Observer};
 use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
-use crate::utils::{compute_median, data_to_matrix};
+use crate::utils::{compute_median, data_to_matrix, scores_single_or_list_to_py};
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
@@ -73,29 +73,9 @@ impl SDO {
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
         let (points_vec, rows) = data_to_matrix(points);
-
-        if self.observers.is_empty() {
-            let empty_scores: Vec<f64> = vec![f64::INFINITY; rows];
-            return Python::with_gil(|py| {
-                if rows == 1 {
-                    Ok(empty_scores[0].into_py(py))
-                } else {
-                    Ok(empty_scores.into_py(py))
-                }
-            });
-        }
-
         let results = self.predict_impl(&points_vec, None);
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
-
-        // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
-        Python::with_gil(|py| {
-            if rows == 1 {
-                Ok(scores[0].into_py(py))
-            } else {
-                Ok(scores.into_py(py))
-            }
-        })
+        Python::with_gil(|py| scores_single_or_list_to_py(&scores, rows, py))
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -148,13 +128,18 @@ impl SDO {
         }
 
         // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
-        // Für jeden Datenpunkt: Finde x nächste Observer und erhöhe deren observations
+        // Für jeden Datenpunkt: Finde x nächste Observer (unter allen Observern) und erhöhe deren observations.
+        // learn: Some(true) → alle Observer werden durchsucht, Rückgabe in nearest_all (num_active ist hier noch 0).
         for data_point in data {
-            // Finde die Indizes der x nächsten Observer zu diesem Datenpunkt (optimiert)
-            let (neighbors, _) =
+            let (_nearest_active, nearest_all_opt) =
                 self.observers
-                    .search_neighbors_unified(data_point, self.x, Some(false));
-            let nearest_indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
+                    .search_neighbors_unified(data_point, self.x, Some(true));
+            let nearest_indices: Vec<usize> = nearest_all_opt
+                .as_ref()
+                .expect("learn=true ⇒ nearest_all is always filled")
+                .iter()
+                .map(|n| n.index)
+                .collect();
 
             // Erhöhe observations für jeden dieser Observer um 1
             for idx in nearest_indices {

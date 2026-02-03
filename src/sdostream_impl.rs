@@ -8,7 +8,8 @@ use std::f64;
 use crate::obs::{NeighborInfo, Observer};
 use crate::sdo_impl::SDO;
 use crate::utils::{
-    data_to_matrix, sample_random_matrix_uniform_unit, time_to_f64, times_to_vec_batch,
+    data_to_matrix, sample_random_matrix_uniform_unit, scores_single_or_list_to_py, time_to_f64,
+    times_to_vec_batch,
 };
 
 impl SDOstream {
@@ -133,13 +134,7 @@ impl SDOstream {
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
         // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
-        Python::with_gil(|py| {
-            if rows == 1 {
-                Ok(scores[0].into_py(py))
-            } else {
-                Ok(scores.into_py(py))
-            }
-        })
+        Python::with_gil(|py| scores_single_or_list_to_py(&scores, rows, py))
     }
 
     /// Berechnet den Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
@@ -152,13 +147,7 @@ impl SDOstream {
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
         // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
-        Python::with_gil(|py| {
-            if rows == 1 {
-                Ok(scores[0].into_py(py))
-            } else {
-                Ok(scores.into_py(py))
-            }
-        })
+        Python::with_gil(|py| scores_single_or_list_to_py(&scores, rows, py))
     }
 
     /// Gibt x zurück (Anzahl der nächsten Nachbarn)

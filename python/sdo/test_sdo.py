@@ -38,8 +38,14 @@ def test_basic_usage():
     assert sdo.x >= 1
     observers = sdo.get_active_observers()
     assert observers.shape[0] >= 1
-    for point in [[4.0, 5.0], [20.0, 21.0]]:
-        score = sdo.predict(np.array([point], dtype=np.float64))
+    test_points = np.array([[4.0, 5.0], [20.0, 21.0]], dtype=np.float64)
+    scores_result = sdo.predict(test_points)
+    # Batch gibt Liste zurück
+    if isinstance(scores_result, list):
+        scores = np.array(scores_result)
+    else:
+        scores = np.array([scores_result])
+    for score in scores:
         assert np.isfinite(score)
     print("✓ Test 1 bestanden")
     return True
@@ -56,7 +62,11 @@ def test_larger_dataset():
     all_data = MinMaxScaler().fit_transform(np.vstack([normal_data, outlier_data]).astype(np.float64))
     sdo = SDO(k=20, x=5, rho=0.3)
     sdo.learn(all_data)
-    scores = np.array([sdo.predict(p.reshape(1, -1)) for p in all_data])
+    scores_result = sdo.predict(all_data.astype(np.float64))
+    if isinstance(scores_result, (list, np.ndarray)):
+        scores = np.array(scores_result)
+    else:
+        scores = np.array([scores_result])
     assert np.mean(scores[:100]) < np.mean(scores[100:])
     print("✓ Test 2 bestanden")
     return True
@@ -141,8 +151,14 @@ def test_3d_data():
     all_data = np.vstack([normal_data, outlier_data]).astype(np.float64)
     sdo = SDO(k=15, x=5, rho=0.2)
     sdo.learn(all_data)
-    for point in [[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]]:
-        score = sdo.predict(np.array([point], dtype=np.float64))
+    test_points = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]], dtype=np.float64)
+    scores_result = sdo.predict(test_points)
+    # Batch gibt Liste zurück
+    if isinstance(scores_result, list):
+        scores = np.array(scores_result)
+    else:
+        scores = np.array([scores_result])
+    for score in scores:
         assert np.isfinite(score)
     print("✓ Test 6 bestanden")
     return True

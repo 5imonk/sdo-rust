@@ -84,6 +84,21 @@ impl ObserverSet {
         connected_components.retain(|component| component.len() >= min_cluster_size);
     }
 
+    /// Gibt gefundene Connected Components zurück (nach remove_small_clusters), nur für Debug.
+    /// Jede Komponente ist eine Liste von Observer-Indizes.
+    pub fn get_connected_components_for_debug(
+        &mut self,
+        zeta: f64,
+        min_cluster_size: usize,
+    ) -> Vec<Vec<usize>> {
+        let mut components = self.find_connected_components(zeta);
+        Self::remove_small_clusters(&mut components, min_cluster_size);
+        components
+            .into_iter()
+            .map(|set| set.into_iter().collect())
+            .collect()
+    }
+
     /// Findet den Cluster mit dem maximalen Score basierend auf historischen Label-Observations
     /// Berücksichtigt nur noch nicht verarbeitete Cluster und noch nicht verwendete Labels
     /// Gibt Option<(cluster_index, max_score, candidate_label)> zurück
@@ -121,46 +136,61 @@ impl ObserverSet {
                 Some((cluster_idx, max_score, candidate_label))
             })
             .max_by(|(_, score_a, _), (_, score_b, _)| {
-                score_a.partial_cmp(score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
     }
 
     /// Weist Labels zu Clustern zu basierend auf historischen Cluster-Beobachtungen (Algorithmus 3.5)
-    /// Iterative Label-Zuweisung: In jeder Iteration wird der Cluster mit maximalem Score gefunden und zugewiesen
+    /// Iterative Label-Zuweisung: In jeder Iteration wird der Cluster mit maximalem Score gefunden und zugewiesen.
+    /// Kaltstart: Sind alle label_observations leer, bekommt jede Connected Component ein eindeutiges Label (0, 1, 2, …).
     /// Gibt eine HashMap zurück: cluster_index -> label (usize)
     pub fn label_connected_components(
         &mut self,
         connected_components: &[HashSet<usize>],
     ) -> HashMap<usize, usize> {
         let mut cluster_labels: HashMap<usize, usize> = HashMap::new();
+
+        // Kaltstart: Alle Observer haben leere label_observations → jeder Component ein eindeutiges Label
+        let any_has_labels = connected_components.iter().any(|cluster_set| {
+            cluster_set.iter().any(|&obs_idx| {
+                self.get(obs_idx)
+                    .map(|o| !o.label_observations.is_empty())
+                    .unwrap_or(false)
+            })
+        });
+        if !any_has_labels {
+            for (cluster_idx, _) in connected_components.iter().enumerate() {
+                cluster_labels.insert(cluster_idx, cluster_idx);
+            }
+            self.last_label = connected_components.len().checked_sub(1).unwrap_or(0);
+            return cluster_labels;
+        }
+
         let mut used_labels: HashSet<usize> = HashSet::new();
         let mut processed_connected_components: HashSet<usize> = HashSet::new();
         let mut next_novel_label = self.last_label + 1;
 
         // Wiederhole bis alle Cluster verarbeitet sind
         while processed_connected_components.len() < connected_components.len() {
-            // Finde Cluster mit maximalem Score
             if let Some((cluster_idx, score, candidate_label)) = self.get_max_cluster_score(
                 connected_components,
                 &used_labels,
                 &processed_connected_components,
             ) {
-                // Weise Label zu basierend auf Score
                 if score == 0.0 {
-                    // Neuer Cluster (novel class) - keine historischen Beobachtungen
                     let novel_label = next_novel_label;
                     cluster_labels.insert(cluster_idx, novel_label);
                     used_labels.insert(novel_label);
                     processed_connected_components.insert(cluster_idx);
                     next_novel_label += 1;
                 } else {
-                    // Label ist verfügbar (wurde bereits in get_max_cluster_score gefiltert)
                     cluster_labels.insert(cluster_idx, candidate_label);
                     used_labels.insert(candidate_label);
                     processed_connected_components.insert(cluster_idx);
                 }
             } else {
-                // Keine Scores mehr verfügbar - weise novel labels zu allen verbleibenden Clustern
                 for (cluster_idx, _) in connected_components.iter().enumerate() {
                     if !processed_connected_components.contains(&cluster_idx) {
                         let novel_label = next_novel_label;
@@ -174,9 +204,7 @@ impl ObserverSet {
             }
         }
 
-        // Aktualisiere last_label
-        self.last_label = next_novel_label - 1;
-
+        self.last_label = next_novel_label.saturating_sub(1);
         cluster_labels
     }
 

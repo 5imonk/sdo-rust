@@ -1,11 +1,11 @@
-use numpy::{PyArray2, PyReadonlyArray2};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
 use crate::sdo_impl::SDO;
-use crate::utils::data_to_matrix;
+use crate::utils::{data_to_matrix, label_score_results_to_py};
 
 /// Sparse Data Observers Clustering (SDOclust) Algorithm
 #[pyclass]
@@ -73,57 +73,8 @@ impl SDOclust {
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
         let (points_vec, rows) = data_to_matrix(points);
-
-        if self.sdo.observers.is_empty() {
-            return Python::with_gil(|py| {
-                if rows == 1 {
-                    let tuple = PyTuple::new_bound(
-                        py,
-                        [(-1i32).into_py(py), f64::NAN.into_py(py)],
-                    );
-                    Ok(tuple.into_py(py))
-                } else {
-                    let empty_results: Vec<Py<PyAny>> = (0..rows)
-                        .map(|_| {
-                            let tuple = PyTuple::new_bound(
-                                py,
-                                [(-1i32).into_py(py), f64::NAN.into_py(py)],
-                            );
-                            tuple.into_py(py)
-                        })
-                        .collect();
-                    let list = PyList::new_bound(py, empty_results);
-                    Ok(list.into_py(py))
-                }
-            });
-        }
-
         let results = self.predict_impl(&points_vec, None);
-
-        // Wenn nur ein Punkt: Rückgabe als Tupel, sonst als Liste von Tupeln
-        Python::with_gil(|py| {
-            if rows == 1 {
-                let (label, score) = results[0];
-                let tuple = PyTuple::new_bound(
-                    py,
-                    [label.into_py(py), score.into_py(py)],
-                );
-                Ok(tuple.into_py(py))
-            } else {
-                let list: Vec<Py<PyAny>> = results
-                    .iter()
-                    .map(|(label, score)| {
-                        let tuple = PyTuple::new_bound(
-                            py,
-                            [label.into_py(py), score.into_py(py)],
-                        );
-                        tuple.into_py(py)
-                    })
-                    .collect();
-                let py_list = PyList::new_bound(py, list);
-                Ok(py_list.into_py(py))
-            }
-        })
+        Python::with_gil(|py| label_score_results_to_py(&results, rows, py))
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -156,6 +107,159 @@ impl SDOclust {
     #[getter]
     pub fn x(&self) -> usize {
         self.sdo.x
+    }
+
+    /// Debug: Gibt die gefundenen Connected Components zurück (ohne Labels).
+    /// Jede Komponente ist eine Liste von Observer-Indizes (aktive Observer).
+    /// Nützlich um zu prüfen, ob falsch verbunden (zu viele in einer Komponente) oder falsch gelabelt.
+    pub fn get_connected_components_debug(&mut self) -> Vec<Vec<usize>> {
+        self.sdo
+            .observers
+            .get_connected_components_for_debug(self.zeta, self.min_cluster_size)
+    }
+
+    /// Gibt aktive Observer inkl. finaler Threshold-Radien für Visualisierung.
+    /// Returns (points, labels, final_threshold_radii) mit final = zeta * local + (1-zeta) * global.
+    pub fn get_active_observers_with_final_thresholds(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PyArray2<f64>>, Vec<i32>, Vec<f64>)> {
+        let active_observers = self.sdo.observers.get_observers(true);
+        if active_observers.is_empty() {
+            let empty = PyArray2::zeros_bound(py, (0, 0), false);
+            return Ok((empty.unbind(), vec![], vec![]));
+        }
+        let local_thresholds: Vec<f64> = active_observers.iter().map(|o| o.local_threshold).collect();
+        let global_threshold = local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
+        let zeta = self.zeta;
+        let final_radii: Vec<f64> = local_thresholds
+            .iter()
+            .map(|h| zeta * h + (1.0 - zeta) * global_threshold)
+            .collect();
+        let labels: Vec<i32> = active_observers
+            .iter()
+            .map(|o| o.get_label().map(|l| l as i32).unwrap_or(-1))
+            .collect();
+        let rows = active_observers.len();
+        let cols = active_observers[0].data.len();
+        let array = PyArray2::zeros_bound(py, (rows, cols), false);
+        unsafe {
+            let mut arr = array.as_array_mut();
+            for (i, obs) in active_observers.iter().enumerate() {
+                for (j, &v) in obs.data.iter().enumerate() {
+                    arr[[i, j]] = v;
+                }
+            }
+        }
+        Ok((array.unbind(), labels, final_radii))
+    }
+
+    /// Gibt alle Observer-Informationen inklusive Thresholds und Distanzen zurück
+    /// Für Connected Components Test
+    /// Returns: (observers_data, global_threshold, active_indices, distance_matrix_dict)
+    /// observers_data: Vec<(data, observations, age, is_active, local_threshold, index)>
+    /// distance_matrix_dict: Python-Dict {index: [(neighbor_index, distance), ...]} für aktive Observer
+    pub fn get_all_observer_data_for_testing(&self, py: Python) -> PyResult<PyObject> {
+        use pyo3::types::PyDict;
+
+        let mut observers_data = Vec::new();
+        let mut distance_matrix: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+
+        // Sammle alle Observer-Daten
+        for observer in self.sdo.observers.iter_observers(false) {
+            let is_active = self.sdo.observers.is_active(observer.index);
+            observers_data.push((
+                observer.data.clone(),
+                observer.observations,
+                observer.age,
+                is_active,
+                observer.local_threshold,
+                observer.index,
+            ));
+        }
+
+        // Sammle aktive Indizes
+        let active_indices: Vec<usize> = self
+            .sdo
+            .observers
+            .iter_observers(true)
+            .map(|obs| obs.index)
+            .collect();
+
+        // Sammle Distanzen für jeden aktiven Observer
+        for &idx in &active_indices {
+            let neighbors = self
+                .sdo
+                .observers
+                .get_neighbors_within_threshold(idx, f64::INFINITY);
+            // Filtere nur aktive Nachbarn
+            let active_neighbors: Vec<(usize, f64)> = neighbors
+                .into_iter()
+                .filter(|(neighbor_idx, _)| self.sdo.observers.is_active(*neighbor_idx))
+                .collect();
+            distance_matrix.insert(idx, active_neighbors);
+        }
+
+        // Berechne global_threshold als Durchschnitt der lokalen Thresholds der aktiven Observer
+        let local_thresholds: Vec<f64> = active_indices
+            .iter()
+            .filter_map(|&idx| {
+                observers_data
+                    .iter()
+                    .find(|obs| obs.5 == idx)
+                    .map(|obs| obs.4)
+            })
+            .collect();
+
+        let global_threshold = if !local_thresholds.is_empty() {
+            local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64
+        } else {
+            f64::INFINITY
+        };
+
+        // Konvertiere zu Python-Objekten
+        let observers_list = PyList::new_bound(
+            py,
+            observers_data.iter().map(|obs| {
+                PyTuple::new_bound(
+                    py,
+                    [
+                        obs.0.clone().into_py(py),
+                        obs.1.into_py(py),
+                        obs.2.into_py(py),
+                        obs.3.into_py(py),
+                        obs.4.into_py(py),
+                        obs.5.into_py(py),
+                    ],
+                )
+            }),
+        );
+
+        let active_indices_list =
+            PyList::new_bound(py, active_indices.iter().map(|&idx| idx.into_py(py)));
+
+        let distance_dict = PyDict::new_bound(py);
+        for (idx, neighbors) in &distance_matrix {
+            let neighbors_list = PyList::new_bound(
+                py,
+                neighbors.iter().map(|(n_idx, dist)| {
+                    PyTuple::new_bound(py, [n_idx.into_py(py), dist.into_py(py)])
+                }),
+            );
+            distance_dict.set_item(idx.into_py(py), neighbors_list)?;
+        }
+
+        let result = PyTuple::new_bound(
+            py,
+            [
+                observers_list.into(),
+                global_threshold.into_py(py),
+                active_indices_list.into(),
+                distance_dict.into(),
+            ],
+        );
+
+        Ok(result.into_py(py))
     }
 }
 
@@ -199,11 +303,7 @@ impl SDOclust {
     }
 
     /// Batch-Vorhersage (Rust-intern).
-    pub fn predict_impl(
-        &self,
-        points: &Vec<Vec<f64>>,
-        learn: Option<bool>,
-    ) -> Vec<(i32, f64)> {
+    pub fn predict_impl(&self, points: &Vec<Vec<f64>>, learn: Option<bool>) -> Vec<(i32, f64)> {
         points
             .iter()
             .map(|point| self.predict_point(point, learn))

@@ -27,11 +27,11 @@ from common import get_observers_and_labels, plot_clustering_with_observers
 def load_synthetic(seed=42):
     """Three 2D clusters, MinMax-scaled (reduced variance for less overlap)."""
     np.random.seed(seed)
-    n = 40
+    n = 500
     std = 0.06
     c1 = np.random.randn(n, 2).astype(np.float64) * std + np.array([0.25, 0.25])
     c2 = np.random.randn(n, 2).astype(np.float64) * std + np.array([0.75, 0.75])
-    c3 = np.random.randn(n, 2).astype(np.float64) * std + np.array([0.5, 0.3])
+    c3 = np.random.randn(n, 2).astype(np.float64) * std + np.array([0.6, 0.1])
     x = np.vstack([c1, c2, c3])
     y_true = np.repeat([0, 1, 2], n)
     x = MinMaxScaler().fit_transform(x)
@@ -78,10 +78,29 @@ def main():
     if x.shape[1] < 2:
         print("Visualisierung nur für mind. 2 Dimensionen; nur ARI wird ausgegeben.")
 
-    model = SDOclust(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+    model = SDOclust(k=200, x=4, rho=0.2, chi=7, zeta=0.1, min_cluster_size=2)
     model.learn(x)
-    y_pred = np.array([model.predict(x[i : i + 1, :])[0] for i in range(len(x))])
-    obs_points, obs_labels = get_observers_and_labels(model)
+
+    # Debug: Gefundene Connected Components (ohne Labels) ausgeben
+    if hasattr(model, "get_connected_components_debug"):
+        components = model.get_connected_components_debug()
+        print(f"\n  Connected Components (ohne Labels): {len(components)} Komponenten")
+        for i, comp in enumerate(components):
+            idx_list = list(comp)
+            if len(idx_list) <= 12:
+                print(f"    Component {i}: size={len(idx_list)}, observer indices: {idx_list}")
+            else:
+                print(f"    Component {i}: size={len(idx_list)}, observer indices: {idx_list[:6]} ... {idx_list[-3:]}")
+        print()
+
+    predictions = model.predict(x)
+    # Batch gibt Liste von Tupeln zurück, einzelner Punkt gibt Tupel zurück
+    if isinstance(predictions, list):
+        y_pred = np.array([pred[0] for pred in predictions])
+    else:
+        # Einzelner Punkt: predictions ist ein Tupel (label, score)
+        y_pred = np.array([predictions[0]])
+    obs_points, obs_labels, obs_radii = get_observers_and_labels(model, with_final_threshold_radii=True)
 
     ari = adjusted_rand_score(y_true, y_pred)
     print(f"  n_clusters: {model.n_clusters()}")
@@ -97,6 +116,7 @@ def main():
             title_prefix="SDOclust – ",
             out_path=out_path,
             suptitle="SDOclust: Daten, Vorhersagen, Observer-Set (Modell)",
+            obs_final_threshold_radii=obs_radii,
         )
 
     print("Fertig.")

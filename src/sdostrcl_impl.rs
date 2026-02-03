@@ -2,9 +2,8 @@ use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
-use crate::utils::{data_to_matrix, times_to_vec_batch};
+use crate::utils::{data_to_matrix, label_score_results_to_py, times_to_vec_batch};
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -90,53 +89,15 @@ impl SDOstreamclust {
 
         let results = self.learn_impl(&points_vec, &times_vec);
 
-        Python::with_gil(|py| {
-            if rows == 1 {
-                let t = pyo3::types::PyTuple::new_bound(
-                    py,
-                    [results[0].0.into_py(py), results[0].1.into_py(py)],
-                );
-                Ok(t.into_py(py))
-            } else {
-                let list: Vec<Py<PyAny>> = results
-                    .iter()
-                    .map(|(l, s)| {
-                        let t = pyo3::types::PyTuple::new_bound(py, [l.into_py(py), s.into_py(py)]);
-                        t.into_py(py)
-                    })
-                    .collect();
-                let py_list = pyo3::types::PyList::new_bound(py, list);
-                Ok(py_list.into_py(py))
-            }
-        })
+        Python::with_gil(|py| label_score_results_to_py(&results, rows, py))
     }
 
     /// Berechnet Cluster-Label und Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
         let (points_vec, rows) = data_to_matrix(points);
-
         let results = self.predict_impl(&points_vec, None);
-
-        Python::with_gil(|py| {
-            if rows == 1 {
-                let t = pyo3::types::PyTuple::new_bound(
-                    py,
-                    [results[0].0.into_py(py), results[0].1.into_py(py)],
-                );
-                Ok(t.into_py(py))
-            } else {
-                let list: Vec<Py<PyAny>> = results
-                    .iter()
-                    .map(|(l, s, _)| {
-                        let t = pyo3::types::PyTuple::new_bound(py, [l.into_py(py), s.into_py(py)]);
-                        t.into_py(py)
-                    })
-                    .collect();
-                let py_list = pyo3::types::PyList::new_bound(py, list);
-                Ok(py_list.into_py(py))
-            }
-        })
+        Python::with_gil(|py| label_score_results_to_py(&results, rows, py))
     }
 
     /// Gibt die Positionen der aktiven Observer als NumPy-Array zurück (Modell für Label-Vorhersage).
@@ -186,32 +147,23 @@ impl SDOstreamclust {
     }
 
     /// Vorhersage für einen einzelnen Punkt (Rust-intern).
-    pub fn predict_point(
-        &self,
-        point: &[f64],
-        learn: Option<bool>,
-    ) -> (i32, f64, Option<Vec<NeighborInfo>>) {
+    pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
         let point_vec: Vec<f64> = point.to_vec();
-        let (median, active_neighbors, all_neighbors_opt) =
-            self.sdostream.predict_point(&point_vec, learn);
+        let (median, active_neighbors, _) = self.sdostream.predict_point(&point_vec, learn);
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
         let predicted_label = self.compute_label(&nearest_active_indices);
-        (predicted_label, median, all_neighbors_opt)
+        (predicted_label, median)
     }
 
     /// Batch-Vorhersage (Rust-intern).
-    pub fn predict_impl(
-        &self,
-        points: &[Vec<f64>],
-        learn: Option<bool>,
-    ) -> Vec<(i32, f64, Option<Vec<NeighborInfo>>)> {
+    pub fn predict_impl(&self, points: &[Vec<f64>], learn: Option<bool>) -> Vec<(i32, f64)> {
         let batch = self.sdostream.predict_impl(points, learn);
         batch
             .into_iter()
-            .map(|(median, active_neighbors, all_neighbors_opt)| {
+            .map(|(median, active_neighbors, _)| {
                 let indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
                 let label = self.compute_label(&indices);
-                (label, median, all_neighbors_opt)
+                (label, median)
             })
             .collect()
     }

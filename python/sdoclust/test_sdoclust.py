@@ -39,13 +39,17 @@ def _make_synthetic_2d(n_per_cluster, centers, seed=42):
 
 def test_two_clusters():
     """Two clusters: expect 2 clusters, reasonable ARI."""
-    x, y_true = _make_synthetic_2d(40, [[0.25, 0.25], [0.75, 0.75]])
-    model = SDOclust(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+    x, y_true = _make_synthetic_2d(100, [[0.25, 0.25], [0.75, 0.75]])
+    model = SDOclust(k=20, x=3, rho=0.2, chi=2, zeta=0.7, min_cluster_size=2)
     model.learn(x)
-    y_pred = np.array([
-        model.predict(x[i : i + 1, :])[0] for i in range(len(x))
-    ])
-    obs_points, obs_labels = get_observers_and_labels(model)
+    predictions = model.predict(x)
+    # Batch gibt Liste von Tupeln zurück, einzelner Punkt gibt Tupel zurück
+    if isinstance(predictions, list):
+        y_pred = np.array([pred[0] for pred in predictions])
+    else:
+        # Einzelner Punkt: predictions ist ein Tupel (label, score)
+        y_pred = np.array([predictions[0]])
+    obs_points, obs_labels, _ = get_observers_and_labels(model)
     ari = adjusted_rand_score(y_true, y_pred)
     assert model.n_clusters() >= 1
     assert len(obs_labels) > 0
@@ -56,15 +60,19 @@ def test_two_clusters():
 def test_three_clusters():
     """Three clusters: expect multiple clusters, positive ARI possible."""
     x, y_true = _make_synthetic_2d(
-        40,
+        100,
         [[0.25, 0.25], [0.75, 0.75], [0.5, 0.3]],
         seed=43,
     )
-    model = SDOclust(k=30, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+    model = SDOclust(k=20, x=3, rho=0.2, chi=2, zeta=0.7, min_cluster_size=2)
     model.learn(x)
-    y_pred = np.array([
-        model.predict(x[i : i + 1, :])[0] for i in range(len(x))
-    ])
+    predictions = model.predict(x)
+    # Batch gibt Liste von Tupeln zurück, einzelner Punkt gibt Tupel zurück
+    if isinstance(predictions, list):
+        y_pred = np.array([pred[0] for pred in predictions])
+    else:
+        # Einzelner Punkt: predictions ist ein Tupel (label, score)
+        y_pred = np.array([predictions[0]])
     ari = adjusted_rand_score(y_true, y_pred)
     assert model.n_clusters() >= 1
     print(f"  test_three_clusters: n_clusters={model.n_clusters()}, ARI={ari:.4f}")
@@ -74,11 +82,15 @@ def test_three_clusters():
 def test_single_cluster():
     """Single compact cluster: one cluster, no crash."""
     x, _ = _make_synthetic_2d(50, [[0.5, 0.5]], seed=44)
-    model = SDOclust(k=25, x=5, rho=0.2, chi=4, zeta=0.5, min_cluster_size=2)
+    model = SDOclust(k=25, x=5, rho=0.2, chi=2, zeta=0.5, min_cluster_size=2)
     model.learn(x)
-    y_pred = np.array([
-        model.predict(x[i : i + 1, :])[0] for i in range(len(x))
-    ])
+    predictions = model.predict(x)
+    # Batch gibt Liste von Tupeln zurück, einzelner Punkt gibt Tupel zurück
+    if isinstance(predictions, list):
+        y_pred = np.array([pred[0] for pred in predictions])
+    else:
+        # Einzelner Punkt: predictions ist ein Tupel (label, score)
+        y_pred = np.array([predictions[0]])
     assert model.n_clusters() >= 1
     assert np.all(y_pred >= -1)
     print(f"  test_single_cluster: n_clusters={model.n_clusters()}")
