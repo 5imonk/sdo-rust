@@ -1,10 +1,11 @@
 use numpy::{PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
+use pyo3::types::{PyList, PyTuple};
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
 use crate::sdo_impl::SDO;
-use crate::utils::{data_to_matrix, point_to_vec};
+use crate::utils::data_to_matrix;
 
 /// Sparse Data Observers Clustering (SDOclust) Algorithm
 #[pyclass]
@@ -46,10 +47,7 @@ impl SDOclust {
     /// Lernt das Modell aus den Daten und führt Clustering durch
     pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
         // Konvertiere Daten zu Vec<Vec<f64>>
-        let data_vec = data_to_matrix(data);
-
-        // Anzahl der Datenpunkte
-        let rows = data_vec.len();
+        let (data_vec, rows) = data_to_matrix(data);
 
         // Überprüfe auf leere Daten oder k=0
         if rows == 0 || self.k == 0 {
@@ -69,21 +67,63 @@ impl SDOclust {
         Ok(())
     }
 
-    /// Berechnet das Cluster-Label für einen Datenpunkt
-    /// Returns (label, outlier_score)
-    #[pyo3(signature = (point))]
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
+    /// Berechnet das Cluster-Label für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
+    /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
+    /// Returns (label, outlier_score) für einen Punkt oder Liste von (label, outlier_score) Tupeln für mehrere Punkte
+    #[pyo3(signature = (points))]
+    pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
+        let (points_vec, rows) = data_to_matrix(points);
+
         if self.sdo.observers.is_empty() {
-            return Ok((-1, f64::NAN)); // Kein Label (Outlier)
+            return Python::with_gil(|py| {
+                if rows == 1 {
+                    let tuple = PyTuple::new_bound(
+                        py,
+                        [(-1i32).into_py(py), f64::NAN.into_py(py)],
+                    );
+                    Ok(tuple.into_py(py))
+                } else {
+                    let empty_results: Vec<Py<PyAny>> = (0..rows)
+                        .map(|_| {
+                            let tuple = PyTuple::new_bound(
+                                py,
+                                [(-1i32).into_py(py), f64::NAN.into_py(py)],
+                            );
+                            tuple.into_py(py)
+                        })
+                        .collect();
+                    let list = PyList::new_bound(py, empty_results);
+                    Ok(list.into_py(py))
+                }
+            });
         }
 
-        // Konvertiere Punkt zu Vec<f64>
-        let point_vec = point_to_vec(point);
+        let results = self.predict_impl(&points_vec, None);
 
-        // Rufe die interne Vorhersagemethode auf
-        let (label, outlier_score) = self.predict_impl(&point_vec, None);
-
-        Ok((label, outlier_score))
+        // Wenn nur ein Punkt: Rückgabe als Tupel, sonst als Liste von Tupeln
+        Python::with_gil(|py| {
+            if rows == 1 {
+                let (label, score) = results[0];
+                let tuple = PyTuple::new_bound(
+                    py,
+                    [label.into_py(py), score.into_py(py)],
+                );
+                Ok(tuple.into_py(py))
+            } else {
+                let list: Vec<Py<PyAny>> = results
+                    .iter()
+                    .map(|(label, score)| {
+                        let tuple = PyTuple::new_bound(
+                            py,
+                            [label.into_py(py), score.into_py(py)],
+                        );
+                        tuple.into_py(py)
+                    })
+                    .collect();
+                let py_list = PyList::new_bound(py, list);
+                Ok(py_list.into_py(py))
+            }
+        })
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -135,8 +175,9 @@ impl SDOclust {
         );
     }
 
-    pub fn predict_impl(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
-        let (median, active_neighbors, _all_neighbors_opt) = self.sdo.predict_impl(point, learn);
+    /// Vorhersage für einen einzelnen Punkt (Rust-intern).
+    pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
+        let (median, active_neighbors, _all_neighbors_opt) = self.sdo.predict_point(point, learn);
         let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Zähle die Häufigkeit der Labels
@@ -155,6 +196,18 @@ impl SDOclust {
         } else {
             (-1, median) // Kein Label gefunden (Outlier)
         }
+    }
+
+    /// Batch-Vorhersage (Rust-intern).
+    pub fn predict_impl(
+        &self,
+        points: &Vec<Vec<f64>>,
+        learn: Option<bool>,
+    ) -> Vec<(i32, f64)> {
+        points
+            .iter()
+            .map(|point| self.predict_point(point, learn))
+            .collect()
     }
 }
 

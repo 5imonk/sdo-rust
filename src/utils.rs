@@ -78,7 +78,7 @@ pub fn point_to_vec(point: PyReadonlyArray2<f64>) -> Vec<f64> {
 
 /// Converts a 2D numpy array to a Vec<Vec<f64>> (matrix)
 /// Returns: Vector of rows, each row is a Vec<f64>
-pub fn data_to_matrix(data: PyReadonlyArray2<f64>) -> Vec<Vec<f64>> {
+pub fn data_to_matrix(data: PyReadonlyArray2<f64>) -> (Vec<Vec<f64>>, usize) {
     let data_slice = data.as_array();
     let rows = data_slice.nrows();
 
@@ -89,7 +89,7 @@ pub fn data_to_matrix(data: PyReadonlyArray2<f64>) -> Vec<Vec<f64>> {
         matrix.push(row);
     }
 
-    matrix
+    (matrix, rows)
 }
 
 pub fn time_to_f64(
@@ -129,9 +129,11 @@ pub fn times_to_vec_batch(
     if let Some(time_array) = time {
         let time_slice = time_array.as_array();
         if time_slice.len() != rows {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "time muss gleiche Länge wie points haben: {} != {}",
+                time_slice.len(),
+                rows
+            )));
         }
         for i in 0..rows {
             times_vec.push(time_slice[i]);
@@ -139,11 +141,7 @@ pub fn times_to_vec_batch(
     } else {
         // Auto-generiere Zeiten basierend auf use_explicit_time
         for i in 0..rows {
-            let current_time = time_to_f64(
-                None,
-                use_explicit_time,
-                data_points_processed + i,
-            )?;
+            let current_time = time_to_f64(None, use_explicit_time, data_points_processed + i)?;
             times_vec.push(current_time);
         }
     }

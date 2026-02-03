@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
-use crate::utils::times_to_vec_batch;
+use crate::utils::{data_to_matrix, times_to_vec_batch};
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -78,13 +78,7 @@ impl SDOstreamclust {
         points: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<PyObject> {
-        let data_slice = points.as_array();
-        let rows = data_slice.nrows();
-        let mut points_vec = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let row: Vec<f64> = data_slice.row(i).to_vec();
-            points_vec.push(row);
-        }
+        let (points_vec, rows) = data_to_matrix(points);
 
         // Bestimme Zeiten für alle Punkte
         let times_vec = times_to_vec_batch(
@@ -98,7 +92,10 @@ impl SDOstreamclust {
 
         Python::with_gil(|py| {
             if rows == 1 {
-                let t = pyo3::types::PyTuple::new_bound(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                let t = pyo3::types::PyTuple::new_bound(
+                    py,
+                    [results[0].0.into_py(py), results[0].1.into_py(py)],
+                );
                 Ok(t.into_py(py))
             } else {
                 let list: Vec<Py<PyAny>> = results
@@ -117,19 +114,16 @@ impl SDOstreamclust {
     /// Berechnet Cluster-Label und Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
-        let data_slice = points.as_array();
-        let rows = data_slice.nrows();
-        let mut points_vec = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let row: Vec<f64> = data_slice.row(i).to_vec();
-            points_vec.push(row);
-        }
+        let (points_vec, rows) = data_to_matrix(points);
 
         let results = self.predict_impl(&points_vec, None);
 
         Python::with_gil(|py| {
             if rows == 1 {
-                let t = pyo3::types::PyTuple::new_bound(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                let t = pyo3::types::PyTuple::new_bound(
+                    py,
+                    [results[0].0.into_py(py), results[0].1.into_py(py)],
+                );
                 Ok(t.into_py(py))
             } else {
                 let list: Vec<Py<PyAny>> = results
@@ -164,7 +158,8 @@ impl SDOstreamclust {
 impl SDOstreamclust {
     /// Verarbeitet einen einzelnen Datenpunkt (Rust-intern).
     pub fn learn_point(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
-        let (median, active_neighbors, _all_neighbors_opt) = self.sdostream.learn_point(point, time);
+        let (median, active_neighbors, _all_neighbors_opt) =
+            self.sdostream.learn_point(point, time);
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         let fading = self.sdostream.get_fading();
@@ -181,11 +176,7 @@ impl SDOstreamclust {
     }
 
     /// Verarbeitet einen Batch (Rust-intern).
-    pub fn learn_impl(
-        &mut self,
-        points: &[Vec<f64>],
-        times: &[f64],
-    ) -> Vec<(i32, f64)> {
+    pub fn learn_impl(&mut self, points: &[Vec<f64>], times: &[f64]) -> Vec<(i32, f64)> {
         assert_eq!(points.len(), times.len());
         let mut results = Vec::with_capacity(points.len());
         for (point, time) in points.iter().zip(times.iter()) {

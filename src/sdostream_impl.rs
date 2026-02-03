@@ -98,7 +98,10 @@ impl SDOstream {
 
         let start_time = time_to_f64(time, self.use_explicit_time, 0)?;
         let data_vec = match data {
-            Some(data_array) => Some(data_to_matrix(data_array)),
+            Some(data_array) => {
+                let (matrix, _rows) = data_to_matrix(data_array);
+                Some(matrix)
+            }
             None => None,
         };
 
@@ -115,13 +118,8 @@ impl SDOstream {
         points: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<PyObject> {
-        let data_slice = points.as_array();
-        let rows = data_slice.nrows();
-        let mut points_vec = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let row: Vec<f64> = data_slice.row(i).to_vec();
-            points_vec.push(row);
-        }
+        // Convert points to Vec<Vec<f64>>
+        let (points_vec, rows) = data_to_matrix(points);
 
         // Bestimme Zeiten für alle Punkte
         let times_vec = times_to_vec_batch(
@@ -148,13 +146,8 @@ impl SDOstream {
     /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
-        let data_slice = points.as_array();
-        let rows = data_slice.nrows();
-        let mut points_vec = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let row: Vec<f64> = data_slice.row(i).to_vec();
-            points_vec.push(row);
-        }
+        let (points_vec, rows) = data_to_matrix(points);
+
         let results = self.predict_impl(&points_vec, Some(false));
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
@@ -332,7 +325,7 @@ impl SDOstream {
 
         // Schritt 2: Predict – x nächste aktive Observer, Median
         let (median, active_neighbors, all_neighbors_opt) =
-            self.sdo.predict_impl(point, Some(true));
+            self.sdo.predict_point(point, Some(true));
 
         // Schritt 3: Ersetzungen ausführen (markierte Observer ersetzen)
         let new_index = if let Some((replace_idx, total_replacements)) = mark {
@@ -433,7 +426,7 @@ impl SDOstream {
         point: &Vec<f64>,
         learn: Option<bool>,
     ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
-        let (median, active_neighbors, all_neighbors_opt) = self.sdo.predict_impl(point, learn);
+        let (median, active_neighbors, all_neighbors_opt) = self.sdo.predict_point(point, learn);
         (median, active_neighbors, all_neighbors_opt)
     }
 

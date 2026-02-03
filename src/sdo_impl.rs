@@ -8,7 +8,7 @@ use std::f64;
 use crate::obs::{NeighborInfo, Observer};
 use crate::obset::ObserverSet;
 use crate::utils::DistanceMetric;
-use crate::utils::{compute_median, data_to_matrix, point_to_vec};
+use crate::utils::{compute_median, data_to_matrix};
 
 /// Sparse Data Observers (SDO) Algorithm
 #[pyclass]
@@ -48,10 +48,7 @@ impl SDO {
     #[pyo3(signature = (data, *))]
     pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
         // Konvertiere Daten zu Vec<Vec<f64>>
-        let data_vec = data_to_matrix(data);
-
-        // Anzahl der Datenpunkte
-        let rows = data_vec.len();
+        let (data_vec, rows) = data_to_matrix(data);
 
         // Überprüfe auf leere Daten oder k=0
         if rows == 0 || self.k == 0 {
@@ -71,19 +68,34 @@ impl SDO {
         Ok(())
     }
 
-    /// Berechnet den Outlier-Score für einen Datenpunkt
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
+    /// Berechnet den Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
+    /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
+    #[pyo3(signature = (points))]
+    pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
+        let (points_vec, rows) = data_to_matrix(points);
+
         if self.observers.is_empty() {
-            return Ok(f64::INFINITY);
+            let empty_scores: Vec<f64> = vec![f64::INFINITY; rows];
+            return Python::with_gil(|py| {
+                if rows == 1 {
+                    Ok(empty_scores[0].into_py(py))
+                } else {
+                    Ok(empty_scores.into_py(py))
+                }
+            });
         }
 
-        // Konvertiere Punkt zu Vec<f64>
-        let point_vec = point_to_vec(point);
+        let results = self.predict_impl(&points_vec, None);
+        let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
-        // Rufe die interne Vorhersagemethode auf
-        let (median, _active_neighbors, _all_neighbors_opt) = self.predict_impl(&point_vec, None);
-
-        Ok(median)
+        // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
+        Python::with_gil(|py| {
+            if rows == 1 {
+                Ok(scores[0].into_py(py))
+            } else {
+                Ok(scores.into_py(py))
+            }
+        })
     }
 
     /// Konvertiert active_observers zu NumPy-Array für Python
@@ -158,7 +170,8 @@ impl SDO {
             .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
     }
 
-    pub(crate) fn predict_impl(
+    /// Vorhersage für einen einzelnen Punkt (Rust-intern).
+    pub(crate) fn predict_point(
         &self,
         point: &[f64],
         learn: Option<bool>,
@@ -180,6 +193,18 @@ impl SDO {
         let median = compute_median(&distances);
 
         (median, active_neighbors, all_neighbors_opt)
+    }
+
+    /// Batch-Vorhersage (Rust-intern).
+    pub(crate) fn predict_impl(
+        &self,
+        points: &Vec<Vec<f64>>,
+        learn: Option<bool>,
+    ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        points
+            .iter()
+            .map(|point| self.predict_point(point, learn))
+            .collect()
     }
 
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)
