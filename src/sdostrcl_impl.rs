@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
-use crate::utils::{point_to_vec, time_to_f64};
+use crate::utils::time_to_f64;
 
 /// SDOstreamclust Algorithm - Streaming-Version von SDOclust
 /// Baut auf SDOstream auf und fügt Clustering-Logik hinzu
@@ -70,37 +70,93 @@ impl SDOstreamclust {
         })
     }
 
-    /// Verarbeitet einen einzelnen Datenpunkt aus dem Stream (Algorithmus 3.2)
-    #[pyo3(signature = (point, *, time = None))]
+    /// Verarbeitet einen oder mehrere Datenpunkte aus dem Stream (Batch-Verarbeitung).
+    /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
+    #[pyo3(signature = (points, *, time = None))]
     pub fn learn(
         &mut self,
-        point: PyReadonlyArray2<f64>,
+        points: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<(i32, f64)> {
-        // Extract point vector
-        let point_vec = point_to_vec(point);
+    ) -> PyResult<PyObject> {
+        let data_slice = points.as_array();
+        let rows = data_slice.nrows();
+        let mut points_vec = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let row: Vec<f64> = data_slice.row(i).to_vec();
+            points_vec.push(row);
+        }
 
-        // Determine current time based on initialization strategy
-        let current_time = time_to_f64(
-            time,
-            self.sdostream.get_use_explicit_time(),
-            self.sdostream.get_data_points_processed(),
-        )?;
+        let mut times_vec = Vec::with_capacity(rows);
+        if let Some(time_array) = time {
+            let time_slice = time_array.as_array();
+            if time_slice.len() != rows {
+                return Err(PyErr::new::<PyValueError, _>(
+                    format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
+                ));
+            }
+            for i in 0..rows {
+                times_vec.push(time_slice[i]);
+            }
+        } else {
+            for i in 0..rows {
+                let t = time_to_f64(
+                    None,
+                    self.sdostream.get_use_explicit_time(),
+                    self.sdostream.get_data_points_processed() + i,
+                ).map_err(|e| e)?;
+                times_vec.push(t);
+            }
+        }
 
-        // Call internal learn implementation
-        let (predicted_label, outlier_score) = self.learn_impl(&point_vec, current_time);
+        let results = self.learn_impl(&points_vec, &times_vec);
 
-        Ok((predicted_label, outlier_score))
+        Python::with_gil(|py| {
+            if rows == 1 {
+                let t = pyo3::types::PyTuple::new(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                Ok(t.into_py(py))
+            } else {
+                let list: Vec<Py<PyAny>> = results
+                    .iter()
+                    .map(|(l, s)| {
+                        let t = pyo3::types::PyTuple::new(py, [l.into_py(py), s.into_py(py)]);
+                        t.into_py(py)
+                    })
+                    .collect();
+                let py_list = pyo3::types::PyList::new(py, list);
+                Ok(py_list.into_py(py))
+            }
+        })
     }
 
-    /// Berechnet das Cluster-Label für einen Datenpunkt (Gleichung 3.4)
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<(i32, f64)> {
-        let point_vec = point_to_vec(point);
+    /// Berechnet Cluster-Label und Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
+    #[pyo3(signature = (points))]
+    pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
+        let data_slice = points.as_array();
+        let rows = data_slice.nrows();
+        let mut points_vec = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let row: Vec<f64> = data_slice.row(i).to_vec();
+            points_vec.push(row);
+        }
 
-        let (predicted_label, outlier_score, _all_neighbors_opt) =
-            self.predict_impl(&point_vec, None);
+        let results = self.predict_impl(&points_vec, None);
 
-        Ok((predicted_label, outlier_score))
+        Python::with_gil(|py| {
+            if rows == 1 {
+                let t = pyo3::types::PyTuple::new(py, [results[0].0.into_py(py), results[0].1.into_py(py)]);
+                Ok(t.into_py(py))
+            } else {
+                let list: Vec<Py<PyAny>> = results
+                    .iter()
+                    .map(|(l, s, _)| {
+                        let t = pyo3::types::PyTuple::new(py, [l.into_py(py), s.into_py(py)]);
+                        t.into_py(py)
+                    })
+                    .collect();
+                let py_list = pyo3::types::PyList::new(py, list);
+                Ok(py_list.into_py(py))
+            }
+        })
     }
 
     /// Gibt die Positionen der aktiven Observer als NumPy-Array zurück (Modell für Label-Vorhersage).
@@ -120,40 +176,67 @@ impl SDOstreamclust {
 }
 
 impl SDOstreamclust {
-    /// Interner Zugriff auf mutable SDOstream
-    pub fn learn_impl(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
-        // Verwende SDOstream für Modell-Erstellung (Sample, Observe, Clean)
-        let (median, active_neighbors, _all_neighbors_opt) = self.sdostream.learn_impl(point, time);
+    /// Verarbeitet einen einzelnen Datenpunkt (Rust-intern).
+    pub fn learn_point(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
+        let (median, active_neighbors, _all_neighbors_opt) = self.sdostream.learn_point(point, time);
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
-        // Führe vollständiges Clustering durch (inkl. Thresholds, Connected Components, Label-Zuweisung, Fading)
         let fading = self.sdostream.get_fading();
         let _cluster_map = self.sdostream.get_sdo_mut().observers.learn_clustering(
             self.chi,
             self.zeta,
             self.min_cluster_size,
-            Some(fading), // Fading für Streaming
-            Some(time),   // Aktuelle Zeit
+            Some(fading),
+            Some(time),
         );
 
         let predicted_label = self.compute_label(&nearest_active_indices);
-
         (predicted_label, median)
     }
 
-    pub fn predict_impl(
+    /// Verarbeitet einen Batch (Rust-intern).
+    pub fn learn_impl(
+        &mut self,
+        points: &[Vec<f64>],
+        times: &[f64],
+    ) -> Vec<(i32, f64)> {
+        assert_eq!(points.len(), times.len());
+        let mut results = Vec::with_capacity(points.len());
+        for (point, time) in points.iter().zip(times.iter()) {
+            results.push(self.learn_point(point, *time));
+        }
+        results
+    }
+
+    /// Vorhersage für einen einzelnen Punkt (Rust-intern).
+    pub fn predict_point(
         &self,
         point: &[f64],
         learn: Option<bool>,
     ) -> (i32, f64, Option<Vec<NeighborInfo>>) {
         let point_vec: Vec<f64> = point.to_vec();
         let (median, active_neighbors, all_neighbors_opt) =
-            self.sdostream.predict_impl(&point_vec, learn);
+            self.sdostream.predict_point(&point_vec, learn);
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-
         let predicted_label = self.compute_label(&nearest_active_indices);
-
         (predicted_label, median, all_neighbors_opt)
+    }
+
+    /// Batch-Vorhersage (Rust-intern).
+    pub fn predict_impl(
+        &self,
+        points: &[Vec<f64>],
+        learn: Option<bool>,
+    ) -> Vec<(i32, f64, Option<Vec<NeighborInfo>>)> {
+        let batch = self.sdostream.predict_impl(points, learn);
+        batch
+            .into_iter()
+            .map(|(median, active_neighbors, all_neighbors_opt)| {
+                let indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+                let label = self.compute_label(&indices);
+                (label, median, all_neighbors_opt)
+            })
+            .collect()
     }
 }
 

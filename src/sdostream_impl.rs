@@ -7,7 +7,7 @@ use std::f64;
 
 use crate::obs::{NeighborInfo, Observer};
 use crate::sdo_impl::SDO;
-use crate::utils::{data_to_matrix, point_to_vec, sample_random_matrix_uniform_unit, time_to_f64};
+use crate::utils::{data_to_matrix, sample_random_matrix_uniform_unit, time_to_f64};
 
 impl SDOstream {
     /// Berechnet den Fading-Parameter f = exp(-T_fading^-1)
@@ -105,33 +105,81 @@ impl SDOstream {
         Ok(())
     }
 
-    /// Verarbeitet einen einzelnen Datenpunkt aus dem Stream
-    #[pyo3(signature = (point, *, time = None))]
+    /// Verarbeitet einen oder mehrere Datenpunkte aus dem Stream (Batch-Verarbeitung).
+    /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
+    #[pyo3(signature = (points, *, time = None))]
     pub fn learn(
         &mut self,
-        point: PyReadonlyArray2<f64>,
+        points: PyReadonlyArray2<f64>,
         time: Option<PyReadonlyArray1<f64>>,
-    ) -> PyResult<f64> {
-        let point_vec: Vec<f64> = point_to_vec(point);
+    ) -> PyResult<PyObject> {
+        let data_slice = points.as_array();
+        let rows = data_slice.nrows();
+        let mut points_vec = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let row: Vec<f64> = data_slice.row(i).to_vec();
+            points_vec.push(row);
+        }
 
-        // Bestimme Zeit basierend auf Initialisierungs-Strategie
-        let current_time = time_to_f64(time, self.use_explicit_time, self.data_points_processed)?;
+        // Bestimme Zeiten für alle Punkte
+        let mut times_vec = Vec::with_capacity(rows);
+        if let Some(time_array) = time {
+            let time_slice = time_array.as_array();
+            if time_slice.len() != rows {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("time muss gleiche Länge wie points haben: {} != {}", time_slice.len(), rows),
+                ));
+            }
+            for i in 0..rows {
+                times_vec.push(time_slice[i]);
+            }
+        } else {
+            // Auto-generiere Zeiten basierend auf use_explicit_time
+            for i in 0..rows {
+                let current_time = time_to_f64(
+                    None,
+                    self.use_explicit_time,
+                    self.data_points_processed + i,
+                )?;
+                times_vec.push(current_time);
+            }
+        }
 
-        let (median, _active_neighbors, _all_neighbors_opt) =
-            self.learn_impl(&point_vec, current_time);
+        let results = self.learn_impl(&points_vec, &times_vec);
+        let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
-        Ok(median)
+        // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
+        Python::with_gil(|py| {
+            if rows == 1 {
+                Ok(scores[0].into_py(py))
+            } else {
+                Ok(scores.into_py(py))
+            }
+        })
     }
 
-    /// Berechnet den Outlier-Score für einen Datenpunkt (delegiert an SDO)
-    #[pyo3(signature = (point))]
-    pub fn predict(&self, point: PyReadonlyArray2<f64>) -> PyResult<f64> {
-        let point_vec: Vec<f64> = point_to_vec(point);
+    /// Berechnet den Outlier-Score für einen oder mehrere Datenpunkte (Batch-Verarbeitung).
+    /// Ein einzelner Punkt wird als Batch der Größe 1 behandelt.
+    #[pyo3(signature = (points))]
+    pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
+        let data_slice = points.as_array();
+        let rows = data_slice.nrows();
+        let mut points_vec = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let row: Vec<f64> = data_slice.row(i).to_vec();
+            points_vec.push(row);
+        }
+        let results = self.predict_impl(&points_vec, Some(false));
+        let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
 
-        let (median, _active_neighbors, _all_neighbors_opt) =
-            self.predict_impl(&point_vec, Some(false));
-
-        Ok(median)
+        // Wenn nur ein Punkt: Rückgabe als einzelner Wert, sonst als Liste
+        Python::with_gil(|py| {
+            if rows == 1 {
+                Ok(scores[0].into_py(py))
+            } else {
+                Ok(scores.into_py(py))
+            }
+        })
     }
 
     /// Gibt x zurück (Anzahl der nächsten Nachbarn)
@@ -285,7 +333,8 @@ impl SDOstream {
         self.data_points_processed = data_points.len();
     }
 
-    pub(crate) fn learn_impl(
+    /// Verarbeitet einen einzelnen Datenpunkt (Rust-intern).
+    pub(crate) fn learn_point(
         &mut self,
         point: &Vec<f64>,
         time: f64,
@@ -327,6 +376,25 @@ impl SDOstream {
         self.data_points_processed += 1;
 
         (median, active_neighbors, all_neighbors_opt)
+    }
+
+    /// Verarbeitet einen Batch von (point, time) sequentiell (Rust-intern).
+    pub(crate) fn learn_impl(
+        &mut self,
+        points: &[Vec<f64>],
+        times: &[f64],
+    ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        assert_eq!(
+            points.len(),
+            times.len(),
+            "points und times müssen gleiche Länge haben"
+        );
+        let mut results = Vec::with_capacity(points.len());
+        for (point, time) in points.iter().zip(times.iter()) {
+            let r = self.learn_point(point, *time);
+            results.push(r);
+        }
+        results
     }
 
     /// Schritt 1: Liefert (replace_idx, total_replacements) wenn eine Ersetzung fällig ist.
@@ -373,13 +441,26 @@ impl SDOstream {
         candidates.into_iter().take(x).map(|(idx, _)| idx).collect()
     }
 
-    pub(crate) fn predict_impl(
+    /// Vorhersage für einen einzelnen Punkt (Rust-intern).
+    pub(crate) fn predict_point(
         &self,
         point: &Vec<f64>,
         learn: Option<bool>,
     ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         let (median, active_neighbors, all_neighbors_opt) = self.sdo.predict_impl(point, learn);
         (median, active_neighbors, all_neighbors_opt)
+    }
+
+    /// Batch-Vorhersage (Rust-intern).
+    pub(crate) fn predict_impl(
+        &self,
+        points: &[Vec<f64>],
+        learn: Option<bool>,
+    ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        points
+            .iter()
+            .map(|point| self.predict_point(point, learn))
+            .collect()
     }
 
     /// Gibt fading zurück (für interne Verwendung)
@@ -410,7 +491,7 @@ impl SDOstream {
 
 impl SDOstream {
     /// Prüft und führt Ersetzungen basierend auf verstrichener Zeit durch (Lazy Replacement).
-    /// Wird nicht mehr von learn_impl aufgerufen (4-Schritte-Struktur); für Batch/API behalten.
+    /// Wird nicht mehr von learn_point aufgerufen (4-Schritte-Struktur); für Batch/API behalten.
     #[allow(dead_code)]
     fn sample_impl(&mut self, point: &[f64], time: f64) -> Option<usize> {
         let elapsed = time - self.last_replacement_time;
