@@ -109,6 +109,12 @@ impl SDOclust {
         self.sdo.x
     }
 
+    /// Debug/Inspection: Gibt den aktuellen global_threshold aus dem ObserverSet zurück.
+    /// (Dieser Wert wird in `set_thresholds` gesetzt und in `find_connected_components` verwendet.)
+    pub fn get_global_threshold(&self) -> f64 {
+        self.sdo.observers.global_threshold
+    }
+
     /// Debug: Gibt die gefundenen Connected Components zurück (ohne Labels).
     /// Jede Komponente ist eine Liste von Observer-Indizes (aktive Observer).
     /// Nützlich um zu prüfen, ob falsch verbunden (zu viele in einer Komponente) oder falsch gelabelt.
@@ -178,13 +184,14 @@ impl SDOclust {
             ));
         }
 
-        // Sammle aktive Indizes
+        // Sammle aktive Indizes (strict Top-N via iter_observers(true))
         let active_indices: Vec<usize> = self
             .sdo
             .observers
             .iter_observers(true)
             .map(|obs| obs.index)
             .collect();
+        let active_set: std::collections::HashSet<usize> = active_indices.iter().copied().collect();
 
         // Sammle Distanzen für jeden aktiven Observer
         for &idx in &active_indices {
@@ -192,10 +199,10 @@ impl SDOclust {
                 .sdo
                 .observers
                 .get_neighbors_within_threshold(idx, f64::INFINITY);
-            // Filtere nur aktive Nachbarn
+            // Filtere nur aktive Nachbarn (strict Top-N)
             let active_neighbors: Vec<(usize, f64)> = neighbors
                 .into_iter()
-                .filter(|(neighbor_idx, _)| self.sdo.observers.is_active(*neighbor_idx))
+                .filter(|(neighbor_idx, _)| active_set.contains(neighbor_idx))
                 .collect();
             distance_matrix.insert(idx, active_neighbors);
         }

@@ -21,7 +21,12 @@ except ImportError as e:
     print("Bitte im Projektroot 'maturin develop' ausführen.")
     sys.exit(1)
 
-from common import get_observers_and_labels, plot_clustering_with_observers
+from common import (
+    get_observers_and_labels,
+    plot_clustering_with_observers,
+    run_connectivity_debug,
+    debug_distance_and_thresholds,
+)
 
 
 def load_synthetic(seed=42):
@@ -66,6 +71,16 @@ def main():
     parser.add_argument("--arff", default="", help="Optional: ARFF-Datei (sonst synthetische 2D-Daten).")
     parser.add_argument("--out-dir", default=None, help="Verzeichnis für Grafik (default: python/sdoclust/out).")
     parser.add_argument("--no-plot", action="store_true", help="Keine Grafik speichern/anzeigen.")
+    parser.add_argument(
+        "--debug-connectivity",
+        action="store_true",
+        help="Distanzmatrix → Connectivity-Matrix in Python, Connected Components berechnen und mit Rust vergleichen.",
+    )
+    parser.add_argument(
+        "--debug-distance-matrix",
+        action="store_true",
+        help="Rust Distanzmatrix/Thresholds exportieren, in Python neu berechnen und vergleichen.",
+    )
     args = parser.parse_args()
 
     if args.arff and os.path.isfile(args.arff):
@@ -92,6 +107,14 @@ def main():
             else:
                 print(f"    Component {i}: size={len(idx_list)}, observer indices: {idx_list[:6]} ... {idx_list[-3:]}")
         print()
+
+    # Optional: Connectivity-Debug (Distanz → Connectivity → Python-CC vs. Rust-CC)
+    if args.debug_connectivity:
+        run_connectivity_debug(model)
+
+    # Optional: Distanzmatrix + Thresholds Debug (Rust vs. Python-Recalc)
+    if args.debug_distance_matrix:
+        debug_distance_and_thresholds(model, metric="euclidean")
 
     predictions = model.predict(x)
     # Batch gibt Liste von Tupeln zurück, einzelner Punkt gibt Tupel zurück

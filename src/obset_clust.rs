@@ -11,6 +11,7 @@ impl ObserverSet {
         start_index: usize,
         zeta: f64,
         global_threshold: f64,
+        active_set: &HashSet<usize>,
         visited_indices: &mut HashSet<usize>,
     ) -> HashSet<usize> {
         let mut connected_component = HashSet::new();
@@ -32,8 +33,8 @@ impl ObserverSet {
                 let neighbors: Vec<(usize, f64)> = distance_list.distances[..end_pos].to_vec();
 
                 for (neighbor_index, dist) in neighbors {
-                    if visited_indices.contains(&neighbor_index) || !self.is_active(neighbor_index)
-                    {
+                    // Strict Top-N Semantik: nur Indizes aus active_set zulassen
+                    if visited_indices.contains(&neighbor_index) || !active_set.contains(&neighbor_index) {
                         continue;
                     }
 
@@ -57,7 +58,9 @@ impl ObserverSet {
 
     /// Findet alle Connected Components unter den aktiven Observern
     pub fn find_connected_components(&mut self, zeta: f64) -> Vec<HashSet<usize>> {
+        // Strict Top-N aktive Observer (genau num_active via iter_observers(true))
         let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+        let active_set: HashSet<usize> = active_indices.iter().copied().collect();
         let mut connected_components = Vec::new();
         let mut visited_indices: HashSet<usize> = HashSet::new();
         let global_threshold = self.global_threshold;
@@ -67,7 +70,13 @@ impl ObserverSet {
                 continue; // Bereits besucht
             }
 
-            let component = self.dfs(start_index, zeta, global_threshold, &mut visited_indices);
+            let component = self.dfs(
+                start_index,
+                zeta,
+                global_threshold,
+                &active_set,
+                &mut visited_indices,
+            );
             if !component.is_empty() {
                 connected_components.push(component);
             }
@@ -269,11 +278,13 @@ impl ObserverSet {
             self.rebuild_distance_lists();
         }
 
+        // Strict Top-N aktive Observer (genau num_active via iter_observers(true))
         let active_indices: Vec<usize> = self.iter_observers(true).map(|obs| obs.index).collect();
+        let active_set: HashSet<usize> = active_indices.iter().copied().collect();
         let mut local_thresholds = Vec::with_capacity(active_indices.len());
 
         for &idx in &active_indices {
-            let h_omega = self.compute_local_threshold_impl(idx, chi);
+            let h_omega = self.compute_local_threshold_impl(idx, chi, &active_set);
             self.update_local_threshold(idx, h_omega);
             local_thresholds.push(h_omega);
         }
@@ -286,13 +297,18 @@ impl ObserverSet {
     }
 
     /// Implementierung der lokalen Threshold-Berechnung
-    pub(crate) fn compute_local_threshold_impl(&self, index: usize, chi: usize) -> f64 {
+    pub(crate) fn compute_local_threshold_impl(
+        &self,
+        index: usize,
+        chi: usize,
+        active_set: &HashSet<usize>,
+    ) -> f64 {
         if let Some(list) = self.distance_matrix.get(index) {
             let mut found = 0;
 
             // Iteriere über sortierte Distanzen bis chi aktive Observer gefunden
             for (target_idx, dist) in &list.distances {
-                if self.is_active(*target_idx) {
+                if active_set.contains(target_idx) {
                     found += 1;
                     if found == chi {
                         return *dist;
@@ -304,7 +320,7 @@ impl ObserverSet {
             if found > 0 {
                 // Finde letzte aktive Distanz
                 for (target_idx, dist) in list.distances.iter().rev() {
-                    if self.is_active(*target_idx) {
+                        if active_set.contains(target_idx) {
                         return *dist;
                     }
                 }
