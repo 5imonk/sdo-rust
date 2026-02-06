@@ -135,7 +135,8 @@ impl SDOclust {
             let empty = PyArray2::zeros_bound(py, (0, 0), false);
             return Ok((empty.unbind(), vec![], vec![]));
         }
-        let local_thresholds: Vec<f64> = active_observers.iter().map(|o| o.local_threshold).collect();
+        let local_thresholds: Vec<f64> =
+            active_observers.iter().map(|o| o.local_threshold).collect();
         let global_threshold = local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
         let zeta = self.zeta;
         let final_radii: Vec<f64> = local_thresholds
@@ -288,7 +289,8 @@ impl SDOclust {
 
     /// Vorhersage für einen einzelnen Punkt (Rust-intern).
     pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
-        let (median, active_neighbors, _all_neighbors_opt) = self.sdo.predict_point(point, learn);
+        let (median, active_neighbors, _all_neighbors_opt) =
+            self.sdo.predict_point(point, learn, None);
         let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
 
         // Zähle die Häufigkeit der Labels

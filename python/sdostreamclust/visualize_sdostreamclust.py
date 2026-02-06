@@ -2,6 +2,7 @@
 
 import sys
 import os
+import time
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
@@ -161,16 +162,16 @@ filename = os.path.join(_REPO_ROOT, "evaluation_tests", "data", "example", "conc
 t,x,y,n,m,clusters,outliers,dataname = load_data(filename)
 
 # Set the initial block to be of size k
-first_block_size = 50
-block_size = 50  # Remaining blocks will have this size
+first_block_size = 25
+block_size = 200  # Remaining blocks will have this size
 
 # Controls the time window of ground truth / predictions points shown at each frame: obs_T +/- (T / f_T), 
 # obs_T is time of model (observer) snapshot
-f_T = 50
+f_T = 200
 
 k = 800 # Model size
-T = 1000 # Time Horizon (wird zu t_fading)
-T_sampling = 2000 # Sampling Interval (more frequent updates)
+T = 1200 # Time Horizon (wird zu t_fading)
+T_sampling = 1800 # Sampling Interval (more frequent updates)
 # Parameter-Mapping:
 # T -> t_fading
 # qv -> rho (Anteil inaktiver Observer, also rho = 1 - qv)
@@ -221,9 +222,12 @@ print_observers_csv(all_observers, block_num=0, time=t[0], output_file=os.path.j
 chunk = x[:first_block_size, :]
 chunk_time = t[:first_block_size]
 
-# Batch-Verarbeitung für den ersten Block
+# Batch-Verarbeitung für den ersten Block (mit Timing)
 time_array = chunk_time.astype(np.float64)
+t0_learn = time.perf_counter()
 results = classifier.learn(chunk, time=time_array)
+t_learn_first = time.perf_counter() - t0_learn
+learn_times = [t_learn_first]
 if isinstance(results, tuple):
     # Einzelner Punkt (sollte nicht passieren hier)
     all_predic.append(results[0])
@@ -250,9 +254,11 @@ for i in range(first_block_size, x.shape[0], block_size):
     chunk = x[i:i + block_size, :]
     chunk_time = t[i:i + block_size]
     
-    # Batch-Verarbeitung für diesen Block
+    # Batch-Verarbeitung für diesen Block (mit Timing)
     time_array = chunk_time.astype(np.float64)
+    t0_block = time.perf_counter()
     results = classifier.learn(chunk, time=time_array)
+    learn_times.append(time.perf_counter() - t0_block)
     if isinstance(results, tuple):
         # Einzelner Punkt
         all_predic.append(results[0])
@@ -278,6 +284,23 @@ for i in range(first_block_size, x.shape[0], block_size):
 p = np.array(all_predic) # clustering labels
 s = np.array(all_scores) # outlierness scores
 s = -1/(s+1) # norm. to avoid inf scores
+
+# Algorithm timing summary (for comparing model sizes and block sizes)
+total_learn_time = sum(learn_times)
+n_points = x.shape[0]
+print("\n--- SDOstreamclust algorithm timing ---")
+print(f"  Model size (k):     {k}")
+print(f"  First block size:  {first_block_size}")
+print(f"  Block size:        {block_size}")
+print(f"  Total points:      {n_points}")
+print(f"  Number of blocks:  {len(learn_times)}")
+print(f"  Total learn time:  {total_learn_time:.4f} s")
+print(f"  Time per point:    {total_learn_time / n_points * 1000:.3f} ms")
+if len(learn_times) > 1:
+    print(f"  First block time:  {learn_times[0]:.4f} s  (n={first_block_size})")
+    rest = learn_times[1:]
+    print(f"  Other blocks:      min={min(rest):.4f} s, max={max(rest):.4f} s, mean={np.mean(rest):.4f} s  (n={block_size})")
+print("----------------------------------------\n")
 
 # Thresholding top outliers based on Chebyshev's inequality (88.9%)
 # th = np.mean(s)+3*np.std(s)

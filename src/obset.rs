@@ -213,6 +213,7 @@ impl ObserverSet {
                     index: observer_arc.index,
                     local_threshold: observer_arc.local_threshold,
                     label_observations: observer_arc.label_observations.clone(),
+                    label_time: observer_arc.label_time,
                 })
             }
         };
@@ -358,11 +359,16 @@ impl ObserverSet {
 
     /// Find the worst observer by normalized score - O(1)
     /// By default k = 1
-    pub fn find_k_worst_normalized_scores(&self, k: Option<usize>) -> Vec<(usize, f64)> {
+    pub fn find_k_worst(&self, k: Option<usize>) -> Vec<usize> {
+        if let Some(k) = k {
+            if k < 1 {
+                panic!("k must be greater than 0");
+            }
+        }
         self.indices_by_score
             .iter()
             .take(k.unwrap_or(1))
-            .map(|key| (key.index, key.score.0))
+            .map(|key| key.index)
             .collect()
     }
 
@@ -381,11 +387,13 @@ impl ObserverSet {
         &mut self,
         index: usize,
         label_observations: HashMap<usize, f64>,
+        label_time: f64,
     ) -> bool {
         if let Some(arc) = self.observers_by_index.get_mut(&index) {
             if let Some(mut_observer) = Arc::get_mut(arc) {
                 // Exclusive access - update in place (no clone!)
                 mut_observer.label_observations = label_observations;
+                mut_observer.label_time = label_time;
                 true
             } else {
                 // Shared - create new Arc with updated label_observations
@@ -398,6 +406,7 @@ impl ObserverSet {
                     index: observer_arc.index,
                     local_threshold: observer_arc.local_threshold,
                     label_observations,
+                    label_time,
                 });
                 self.observers_by_index.insert(index, updated_observer);
                 true
@@ -425,6 +434,7 @@ impl ObserverSet {
                     index: observer_arc.index,
                     local_threshold,
                     label_observations: observer_arc.label_observations.clone(),
+                    label_time: observer_arc.label_time,
                 });
                 self.observers_by_index.insert(index, updated_observer);
                 true
@@ -442,11 +452,14 @@ impl ObserverSet {
         query_point: &[f64],
         k: usize,
         learn: Option<bool>,
+        k_learn: Option<usize>,
     ) -> (Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         let mut nearest_active = Vec::with_capacity(k);
+        // Determine k for nearest_all: use k_learn if provided, otherwise fall back to k
+        let k_all = k_learn.unwrap_or(0) + k;
         let mut nearest_all = if let Some(flag) = learn {
             if flag {
-                Some(Vec::with_capacity(k))
+                Some(Vec::with_capacity(k_all))
             } else {
                 None
             }
@@ -455,24 +468,25 @@ impl ObserverSet {
         };
 
         // Helper function to update k-nearest vectors with worst candidate replacement
-        let update_k_nearest = |candidates: &mut Vec<NeighborInfo>, neighbor_info: NeighborInfo| {
-            if candidates.len() < k {
-                candidates.push(neighbor_info);
-            } else {
-                // Find worst candidate (max distance)
-                let worst_idx = candidates
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.distance.partial_cmp(&b.distance).unwrap())
-                    .map(|(idx, _)| idx)
-                    .unwrap();
+        let update_k_nearest =
+            |candidates: &mut Vec<NeighborInfo>, neighbor_info: NeighborInfo, k_limit: usize| {
+                if candidates.len() < k_limit {
+                    candidates.push(neighbor_info);
+                } else {
+                    // Find worst candidate (max distance)
+                    let worst_idx = candidates
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.distance.partial_cmp(&b.distance).unwrap())
+                        .map(|(idx, _)| idx)
+                        .unwrap();
 
-                // Replace if new neighbor is closer than current worst
-                if neighbor_info.distance < candidates[worst_idx].distance {
-                    candidates[worst_idx] = neighbor_info;
+                    // Replace if new neighbor is closer than current worst
+                    if neighbor_info.distance < candidates[worst_idx].distance {
+                        candidates[worst_idx] = neighbor_info;
+                    }
                 }
-            }
-        };
+            };
 
         // Single pass through sorted observers
         for (position, obs_key) in self.indices_by_obs.iter().enumerate() {
@@ -506,13 +520,13 @@ impl ObserverSet {
             // Update nearest (all observers if learn is Some(true))
             if let Some(true) = learn {
                 if let Some(ref mut all_vec) = nearest_all {
-                    update_k_nearest(all_vec, neighbor_info.clone());
+                    update_k_nearest(all_vec, neighbor_info.clone(), k_all);
                 }
             }
 
             // Update nearest_active (only active observers)
             if is_active {
-                update_k_nearest(&mut nearest_active, neighbor_info);
+                update_k_nearest(&mut nearest_active, neighbor_info, k);
             }
         }
 

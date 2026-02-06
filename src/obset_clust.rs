@@ -34,7 +34,9 @@ impl ObserverSet {
 
                 for (neighbor_index, dist) in neighbors {
                     // Strict Top-N Semantik: nur Indizes aus active_set zulassen
-                    if visited_indices.contains(&neighbor_index) || !active_set.contains(&neighbor_index) {
+                    if visited_indices.contains(&neighbor_index)
+                        || !active_set.contains(&neighbor_index)
+                    {
                         continue;
                     }
 
@@ -230,8 +232,8 @@ impl ObserverSet {
         chi: usize,
         zeta: f64,
         min_cluster_size: usize,
-        fading: Option<f64>,
-        current_time: Option<f64>,
+        _fading: Option<f64>,
+        _current_time: Option<f64>,
     ) {
         // Schritt 1: Setze Thresholds für alle aktiven Observer
         self.set_thresholds(chi);
@@ -240,18 +242,13 @@ impl ObserverSet {
         let mut connected_components = self.find_connected_components(zeta);
 
         // Schritt 3: Entferne kleine Cluster mit Helper-Methode
-        Self::remove_small_clusters(&mut connected_components, min_cluster_size);
+        connected_components.retain(|component| component.len() >= min_cluster_size);
 
         // Schritt 4: Weise Labels zu basierend auf historischen Label-Observations
         let cluster_labels = self.label_connected_components(&connected_components);
 
-        // Schritt 5: Aktualisiere Label-Observations (mit Fading falls vorhanden)
-        self.update_label_observations_with_clusters(
-            &connected_components,
-            &cluster_labels,
-            fading,
-            current_time,
-        );
+        // Schritt 5: Aktualisiere Label-Observations (nur Zähler)
+        self.update_label_observations_with_clusters(&connected_components, &cluster_labels);
     }
 
     /// Berechnet normalisierte Cluster-Scores für gegebene Observer-Indizes
@@ -320,7 +317,7 @@ impl ObserverSet {
             if found > 0 {
                 // Finde letzte aktive Distanz
                 for (target_idx, dist) in list.distances.iter().rev() {
-                        if active_set.contains(target_idx) {
+                    if active_set.contains(target_idx) {
                         return *dist;
                     }
                 }
@@ -330,84 +327,33 @@ impl ObserverSet {
         f64::INFINITY
     }
 
-    /// Aktualisiert Cluster-Beobachtungen Lω: Fading und/oder Cluster-Updates
-    /// Ersetzt update_cluster_observations_with_fading_and_clusters
-    /// fading: Fading-Parameter f = exp(-T^-1)
-    /// current_time: Aktuelle Zeit ti
-    /// clusters: Liste von Cluster-Sets (kann leer sein, wenn nur Fading angewendet wird)
-    /// cluster_labels: HashMap von cluster_index -> label (kann leer sein, wenn nur Fading angewendet wird)
-    /// Verwendet observer.time als letzte Update-Zeit für Fading-Berechnung
+    /// Aktualisiert Cluster-Beobachtungen Lω: nur Zähler, kein Fading/Zeit.
+    /// Für jeden Observer in einem Cluster: Lcω ← Lcω + 1 für das zugehörige Label.
     pub fn update_label_observations_with_clusters(
         &mut self,
         clusters: &Vec<HashSet<usize>>,
         cluster_labels: &HashMap<usize, usize>,
-        fading: Option<f64>,
-        current_time: Option<f64>,
     ) {
-        // Schritt 1: Wende Fading an (wenn fading und current_time vorhanden)
-        if let (Some(fading_val), Some(current_time_val)) = (fading, current_time) {
-            let updates: Vec<(usize, HashMap<usize, f64>)> = self
-                .iter_observers(false)
-                .map(|observer| {
-                    let observer_time_diff = current_time_val - observer.time;
-                    let fading_factor = fading_val.powf(observer_time_diff);
-
-                    // Wende Fading auf alle Cluster-Beobachtungen an
-                    let mut faded_observations = HashMap::new();
-                    for (&label, &val) in &observer.label_observations {
-                        faded_observations.insert(label, fading_factor * val);
-                    }
-
-                    (observer.index, faded_observations)
-                })
-                .collect();
-
-            // Aktualisiere jeden Observer mit gefadeten Beobachtungen
-            for (index, faded_observations) in updates {
-                // Verwende die Methode aus obset.rs
-                self.update_label_observations(index, faded_observations);
-            }
+        if clusters.is_empty() || cluster_labels.is_empty() {
+            return;
         }
 
-        // Schritt 2: Update Lω für Observer in Clustern: Lcω ← Lcω + 1
-        if !clusters.is_empty() && !cluster_labels.is_empty() {
-            // Sammle alle Updates zuerst, um Borrow-Konflikte zu vermeiden
-            let mut label_updates: Vec<(usize, HashMap<usize, f64>)> = Vec::new();
-            let mut time_updates: Vec<(usize, f64, f64, f64)> = Vec::new();
+        let mut label_updates: Vec<(usize, HashMap<usize, f64>, f64)> = Vec::new();
 
-            for (cluster_idx, cluster_set) in clusters.iter().enumerate() {
-                if let Some(&label) = cluster_labels.get(&cluster_idx) {
-                    // Inkrementiere für jeden Observer im Cluster die Beobachtung für dieses Label
-                    for &obs_idx in cluster_set {
-                        if let Some(observer) = self.get(obs_idx) {
-                            let mut new_observations = observer.label_observations.clone();
-                            *new_observations.entry(label).or_insert(0.0) += 1.0;
-
-                            label_updates.push((obs_idx, new_observations));
-
-                            // Sammle Zeit-Updates wenn current_time vorhanden
-                            if let Some(current_time_val) = current_time {
-                                time_updates.push((
-                                    obs_idx,
-                                    observer.observations,
-                                    observer.age,
-                                    current_time_val,
-                                ));
-                            }
-                        }
+        for (cluster_idx, cluster_set) in clusters.iter().enumerate() {
+            if let Some(&label) = cluster_labels.get(&cluster_idx) {
+                for &obs_idx in cluster_set {
+                    if let Some(observer) = self.get(obs_idx) {
+                        let mut new_observations = observer.label_observations.clone();
+                        *new_observations.entry(label).or_insert(0.0) += 1.0;
+                        label_updates.push((obs_idx, new_observations, observer.label_time));
                     }
                 }
             }
+        }
 
-            // Führe alle Updates aus
-            for (index, new_observations) in label_updates {
-                self.update_label_observations(index, new_observations);
-            }
-
-            // Führe Zeit-Updates aus (verwende update_observer_with_time aus obset_stream.rs)
-            for (index, observations, age, time_val) in time_updates {
-                self.update_observer_with_time(index, observations, age, time_val);
-            }
+        for (index, new_observations, label_time) in label_updates {
+            self.update_label_observations(index, new_observations, label_time);
         }
     }
 }

@@ -2,7 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 // Import the internal modules directly for benchmarks
 use sdo::obs::Observer;
 use sdo::obset::ObserverSet;
-use sdo::utils::DistanceMetric;
+use sdo::sdostrcl_impl::SDOstreamclust;
+use sdo::utils::{sample_random_matrix_uniform_unit, DistanceMetric};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ fn create_test_observer(index: usize, data: Vec<f64>, observations: f64) -> Obse
         index,
         local_threshold: 0.0,
         label_observations: HashMap::new(),
+        label_time: 0.0,
     }
 }
 
@@ -142,12 +144,61 @@ fn benchmark_memory_usage(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark SDOstreamclust learn_impl for profiling (e.g. cargo flamegraph).
+fn benchmark_sdostreamclust_learn_impl(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sdostreamclust_learn_impl");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    let k = 200;
+    let t_fading = 100.0;
+    let t_sampling = 100.0;
+    let x = 3;
+    let rho = 0.2;
+    let chi_min = 1;
+    let chi_prop = 0.05;
+    let zeta = 0.7;
+    let min_cluster_size = 5;
+    let dimension = 2;
+
+    for block_size in [25, 50, 100].iter() {
+        let points = sample_random_matrix_uniform_unit(dimension, *block_size);
+        let times: Vec<f64> = (0..*block_size).map(|i| i as f64).collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("learn_impl", block_size),
+            block_size,
+            |b, _| {
+                b.iter(|| {
+                    let mut model = SDOstreamclust::new_for_benchmark(
+                        k,
+                        t_fading,
+                        t_sampling,
+                        x,
+                        rho,
+                        chi_min,
+                        chi_prop,
+                        zeta,
+                        min_cluster_size,
+                        dimension,
+                    );
+                    model.learn_impl(&points, &times);
+                    black_box(())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_distance_insertion,
     benchmark_neighbor_finding,
     benchmark_batch_operations,
-    benchmark_memory_usage
+    benchmark_memory_usage,
+    benchmark_sdostreamclust_learn_impl
 );
 
 criterion_main!(benches);

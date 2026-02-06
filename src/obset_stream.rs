@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::obs::{NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
+use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
 use crate::obset::ObserverSet;
 
 /// Streaming-Erweiterungen für ObserverSet
@@ -26,7 +26,7 @@ impl ObserverSet {
             let nearest_set: HashSet<usize> = nearest_indices.iter().cloned().collect();
 
             // Verwende iter_observers für effizienten Zugriff ohne Kopie
-            self.iter_observers(true)
+            self.iter_observers(false)
                 .map(|observer| {
                     // Berechne Zeitdifferenz: ti - ti-1
                     let time_diff = current_time - observer.time;
@@ -107,6 +107,7 @@ impl ObserverSet {
                     index: observer_arc.index,
                     local_threshold: observer_arc.local_threshold,
                     label_observations: observer_arc.label_observations.clone(),
+                    label_time: observer_arc.label_time,
                 })
             }
         };
@@ -133,5 +134,104 @@ impl ObserverSet {
         self.indices_by_score.insert(new_score_key);
 
         true
+    }
+
+    /// Batch-Update von observations mit zeitbasiertem Fading
+    /// Zusammenfasst mehrere Beobachtungen (NeighborInfo) und aktualisiert alle Observer
+    ///
+    /// # Arguments
+    /// * `neighbor_info_batch` - Vektor von NeighborInfo-Vektoren (eine pro Beobachtung)
+    /// * `observation_times` - Zeitpunkte für jede Beobachtung (gleiche Länge wie neighbor_info_batch)
+    /// * `fading` - Fading-Parameter f = exp(-T^-1)
+    ///
+    /// # Returns
+    /// Anzahl der verarbeiteten Beobachtungen
+    pub fn update(
+        &mut self,
+        neighbor_info_batch: Vec<Vec<NeighborInfo>>,
+        observation_times: Vec<f64>,
+        fading: f64,
+    ) -> usize {
+        // Validierung
+        assert_eq!(
+            neighbor_info_batch.len(),
+            observation_times.len(),
+            "neighbor_info_batch und observation_times müssen gleiche Länge haben"
+        );
+
+        let num_observations = neighbor_info_batch.len();
+        if num_observations == 0 {
+            return 0;
+        }
+
+        // Berechne reference_start_time (min) und reference_time (max)
+        let reference_start_time = observation_times
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let reference_time = observation_times
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // Berechne batch_age: Maximum observation die ein Observer während dieses Batches erreichen könnte
+        // = Summe über alle observation_times von fading^(reference_time - t)
+        let batch_age: f64 = observation_times
+            .iter()
+            .map(|&t| fading.powf(reference_time - t))
+            .sum();
+
+        // Schritt 1: Zusammenfassen der Beobachtungen
+        // HashMap: Observer-Index -> gewichteter Beitrag (summe von fading_factor)
+        let mut observer_contributions: HashMap<usize, f64> = HashMap::new();
+
+        for (neighbors, &observation_time) in
+            neighbor_info_batch.iter().zip(observation_times.iter())
+        {
+            // Berechne Fading-Faktor für diese Beobachtung: fading^(reference_time - observation_time)
+            let time_elapsed = reference_time - observation_time;
+            let fading_factor = fading.powf(time_elapsed);
+
+            // Für jede NeighborInfo in dieser Beobachtung: addiere fading_factor zum Beitrag
+            for neighbor_info in neighbors {
+                *observer_contributions
+                    .entry(neighbor_info.index)
+                    .or_insert(0.0) += fading_factor;
+            }
+        }
+
+        // Schritt 2: Fade alle Observer und addiere Beiträge
+        let updates: Vec<(usize, f64, f64)> = {
+            self.iter_observers(false)
+                .map(|observer| {
+                    // Für observations: Fade zur reference_time (max)
+                    let fading_factor_obs = fading.powf(reference_time - observer.time);
+
+                    // Hole Beitrag für diesen Observer (0.0 wenn nicht vorhanden)
+                    let contribution = observer_contributions
+                        .get(&observer.index)
+                        .copied()
+                        .unwrap_or(0.0);
+
+                    // Neue observations: gefadete observations + Beiträge (zur reference_time)
+                    let new_observations = fading_factor_obs * observer.observations + contribution;
+
+                    // Für age: Fade zur reference_start_time (min)
+                    let fading_factor_age = fading.powf(reference_start_time - observer.time);
+
+                    // Neue age: gefadete age + batch_age (beide zur reference_start_time)
+                    let new_age = fading_factor_age * observer.age + batch_age * fading_factor_age;
+
+                    (observer.index, new_observations, new_age)
+                })
+                .collect()
+        };
+
+        // Schritt 3: Aktualisiere jeden Observer mit observations, age und reference_time
+        for (index, new_observations, new_age) in updates {
+            self.update_observer_with_time(index, new_observations, new_age, reference_time);
+        }
+
+        num_observations
     }
 }

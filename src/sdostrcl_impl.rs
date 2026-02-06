@@ -2,6 +2,7 @@ use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::obs::NeighborInfo;
 use crate::sdostream_impl::SDOstream;
 use crate::utils::{data_to_matrix, label_score_results_to_py, times_to_vec_batch};
 
@@ -174,37 +175,179 @@ impl SDOstreamclust {
 impl SDOstreamclust {
     /// Verarbeitet einen einzelnen Datenpunkt (Rust-intern).
     pub fn learn_point(&mut self, point: &Vec<f64>, time: f64) -> (i32, f64) {
-        let (median, active_neighbors, _all_neighbors_opt) =
-            self.sdostream.learn_point(point, time);
+        // Schritt 1: Anzahl der Ersetzungen bestimmen
+        let n_replacements = self.sdostream.n_replacements_impl(time);
+
+        // Schritt 2: Predict (inklusive Labels)
+        let (median, active_neighbors, all_neighbors_opt) =
+            self.sdostream
+                .get_sdo()
+                .predict_point(point, Some(true), Some(n_replacements.min(1)));
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
-
-        let fading = self.sdostream.get_fading();
-        let _cluster_map = self.sdostream.get_sdo_mut().observers.learn_clustering(
-            self.chi,
-            self.zeta,
-            self.min_cluster_size,
-            Some(fading),
-            Some(time),
-        );
-
         let predicted_label = self.compute_label(&nearest_active_indices);
+
+        // Schritt 3: Sampling
+        let replacement_pair = if n_replacements > 0 {
+            let pair = self.sdostream.sample_point(point, time, None);
+            // Aktualisiere pending_replacements und last_replacement_time
+            if pair.is_some() {
+                self.sdostream
+                    .set_pending_replacements(n_replacements.saturating_sub(1));
+                self.sdostream.set_last_replacement_time(time);
+            }
+            pair
+        } else {
+            None
+        };
+
+        // Schritt 4: Fitting
+        let final_all_neighbors_opt =
+            self.sdostream
+                .fit_point(all_neighbors_opt, replacement_pair, point, time);
+
+        // Schritt 5: Updating
+        let fading = self.sdostream.get_fading();
+        if let Some(ref neighbors) = final_all_neighbors_opt {
+            let processed = self.sdostream.get_sdo_mut().observers.update(
+                vec![neighbors.clone()],
+                vec![time],
+                fading,
+            );
+            self.sdostream.increment_data_points_processed(processed);
+        }
+
+        // Schritt 6: learn_clustering (einmal, mit batch_age)
+        // Für einzelnen Punkt: batch_age = fading^0 = 1.0
+        let batch_age = 1.0;
+        self.sdostream
+            .get_sdo_mut()
+            .observers
+            .learn_clustering_time(
+                self.chi,
+                self.zeta,
+                self.min_cluster_size,
+                fading,
+                time, // batch_start_time = time für einzelnen Punkt
+                time, // batch_end_time = time für einzelnen Punkt
+                batch_age,
+            );
+
         (predicted_label, median)
     }
 
     /// Verarbeitet einen Batch (Rust-intern).
     pub fn learn_impl(&mut self, points: &[Vec<f64>], times: &[f64]) -> Vec<(i32, f64)> {
         assert_eq!(points.len(), times.len());
-        let mut results = Vec::with_capacity(points.len());
-        for (point, time) in points.iter().zip(times.iter()) {
-            results.push(self.learn_point(point, *time));
+
+        if points.is_empty() {
+            return Vec::new();
         }
-        results
+
+        let batch_size = points.len();
+        let reference_time = *times.last().unwrap();
+
+        // Schritt 1: Set n_replacements
+        let n_replacements_total = self.sdostream.n_replacements_impl(reference_time);
+        let n_replacements = n_replacements_total.min(batch_size);
+        if n_replacements_total > batch_size {
+            self.sdostream
+                .set_pending_replacements(n_replacements_total - batch_size);
+        } else {
+            self.sdostream.set_pending_replacements(0);
+        }
+
+        // Schritt 2: Predict für alle Punkte (inklusive Labels)
+        let predict_results: Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> = points
+            .iter()
+            .map(|point| {
+                self.sdostream
+                    .get_sdo()
+                    .predict_point(point, Some(true), Some(n_replacements))
+            })
+            .collect();
+
+        // Berechne Labels für alle Punkte
+        let predicted_labels: Vec<i32> = predict_results
+            .iter()
+            .map(|(_, active_neighbors, _)| {
+                let indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+                self.compute_label(&indices)
+            })
+            .collect();
+
+        // Schritt 3: Sampling
+        let replacement_pairs = if n_replacements > 0 {
+            let pairs = self.sdostream.sample_impl(points, times, n_replacements);
+            self.sdostream.set_last_replacement_time(reference_time);
+            pairs
+        } else {
+            vec![None; batch_size]
+        };
+
+        // Schritt 4: fit_impl
+        let final_all_neighbors_batch = self.sdostream.fit_impl(
+            predict_results
+                .iter()
+                .map(|(_, _, opt)| opt.as_ref())
+                .collect(),
+            &replacement_pairs,
+            points,
+        );
+
+        // Schritt 5: Update
+        let all_neighbors_for_update: Vec<Vec<NeighborInfo>> = final_all_neighbors_batch
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|v| v.clone()))
+            .collect();
+        let observation_times_for_update: Vec<f64> = final_all_neighbors_batch
+            .iter()
+            .enumerate()
+            .filter_map(|(i, opt)| if opt.is_some() { Some(times[i]) } else { None })
+            .collect();
+
+        let fading = self.sdostream.get_fading();
+        if !all_neighbors_for_update.is_empty() {
+            let processed = self.sdostream.get_sdo_mut().observers.update(
+                all_neighbors_for_update,
+                observation_times_for_update,
+                fading,
+            );
+            self.sdostream.increment_data_points_processed(processed);
+        }
+
+        // Schritt 6: learn_clustering (einmal für den Batch, mit batch_age)
+        let reference_start_time = *times.first().unwrap();
+        let batch_age = times
+            .iter()
+            .map(|&t| fading.powf(reference_time - t))
+            .sum::<f64>()
+            * fading.powf(reference_start_time - reference_time);
+
+        self.sdostream
+            .get_sdo_mut()
+            .observers
+            .learn_clustering_time(
+                self.chi,
+                self.zeta,
+                self.min_cluster_size,
+                fading,
+                reference_start_time, // batch_start_time
+                reference_time,       // batch_end_time
+                batch_age,
+            );
+
+        // Erstelle Ergebnisse: (label, median)
+        predict_results
+            .into_iter()
+            .zip(predicted_labels.into_iter())
+            .map(|((median, _, _), label)| (label, median))
+            .collect()
     }
 
     /// Vorhersage für einen einzelnen Punkt (Rust-intern).
     pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
         let point_vec: Vec<f64> = point.to_vec();
-        let (median, active_neighbors, _) = self.sdostream.predict_point(&point_vec, learn);
+        let (median, active_neighbors, _) = self.sdostream.predict_point(&point_vec, learn, None);
         let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
         let predicted_label = self.compute_label(&nearest_active_indices);
         (predicted_label, median)
@@ -212,7 +355,7 @@ impl SDOstreamclust {
 
     /// Batch-Vorhersage (Rust-intern).
     pub fn predict_impl(&self, points: &[Vec<f64>], learn: Option<bool>) -> Vec<(i32, f64)> {
-        let batch = self.sdostream.predict_impl(points, learn);
+        let batch = self.sdostream.predict_impl(points, learn, None);
         batch
             .into_iter()
             .map(|(median, active_neighbors, _)| {
@@ -249,6 +392,29 @@ impl SDOstreamclust {
     /// Gibt eine mutable Referenz auf das interne SDOstream-Objekt zurück
     pub fn get_sdostream_mut(&mut self) -> &mut SDOstream {
         &mut self.sdostream
+    }
+}
+
+impl SDOstreamclust {
+    /// For benchmarks only: create SDOstreamclust with dimension (no Python).
+    pub fn new_for_benchmark(
+        k: usize,
+        t_fading: f64,
+        t_sampling: f64,
+        x: usize,
+        rho: f64,
+        chi_min: usize,
+        chi_prop: f64,
+        zeta: f64,
+        min_cluster_size: usize,
+        dimension: usize,
+    ) -> Self {
+        Self {
+            sdostream: SDOstream::new_for_benchmark(k, t_fading, t_sampling, x, rho, dimension),
+            chi: ((chi_min as f64).max(chi_prop * (1.0 - rho) * k as f64) as usize),
+            zeta,
+            min_cluster_size,
+        }
     }
 }
 

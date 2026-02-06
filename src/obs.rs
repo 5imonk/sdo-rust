@@ -14,6 +14,8 @@ pub struct Observer {
     pub local_threshold: f64,
     /// Label observations Lω ∈ R^|C| - historische Cluster-Zugehörigkeiten
     pub label_observations: HashMap<usize, f64>,
+    /// last time label_observations were updated
+    pub label_time: f64,
 }
 
 impl Observer {

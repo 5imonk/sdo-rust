@@ -73,7 +73,7 @@ impl SDO {
     #[pyo3(signature = (points))]
     pub fn predict(&self, points: PyReadonlyArray2<f64>) -> PyResult<PyObject> {
         let (points_vec, rows) = data_to_matrix(points);
-        let results = self.predict_impl(&points_vec, None);
+        let results = self.predict_impl(&points_vec, None, None);
         let scores: Vec<f64> = results.iter().map(|(median, _, _)| *median).collect();
         Python::with_gil(|py| scores_single_or_list_to_py(&scores, rows, py))
     }
@@ -133,6 +133,7 @@ impl SDO {
                 index: idx,
                 local_threshold: f64::INFINITY,
                 label_observations: HashMap::new(),
+                label_time: 0.0,
             };
             self.observers.insert(observer);
         }
@@ -143,7 +144,7 @@ impl SDO {
         for data_point in data {
             let (_nearest_active, nearest_all_opt) =
                 self.observers
-                    .search_neighbors_unified(data_point, self.x, Some(true));
+                    .search_neighbors_unified(data_point, self.x, Some(true), None);
             let nearest_indices: Vec<usize> = nearest_all_opt
                 .as_ref()
                 .expect("learn=true ⇒ nearest_all is always filled")
@@ -170,6 +171,7 @@ impl SDO {
         &self,
         point: &[f64],
         learn: Option<bool>,
+        k_learn: Option<usize>,
     ) -> (f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
         if self.observers.is_empty() {
             panic!("No observers found during prediction!");
@@ -178,7 +180,7 @@ impl SDO {
         // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
         let (active_neighbors, all_neighbors_opt) = self
             .observers
-            .search_neighbors_unified(point, self.x, learn);
+            .search_neighbors_unified(point, self.x, learn, k_learn);
         let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
 
         if distances.is_empty() {
@@ -195,10 +197,11 @@ impl SDO {
         &self,
         points: &Vec<Vec<f64>>,
         learn: Option<bool>,
+        k_learn: Option<usize>,
     ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
         points
             .iter()
-            .map(|point| self.predict_point(point, learn))
+            .map(|point| self.predict_point(point, learn, k_learn))
             .collect()
     }
 

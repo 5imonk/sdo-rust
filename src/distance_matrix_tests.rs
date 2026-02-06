@@ -16,6 +16,7 @@ mod tests {
             index,
             local_threshold: 0.0,
             label_observations: HashMap::new(),
+            label_time: 0.0,
         }
     }
 

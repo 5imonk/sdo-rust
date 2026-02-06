@@ -20,6 +20,7 @@ mod tests {
                 index: 0,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(0, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![0.1, 0.1],
@@ -29,6 +30,7 @@ mod tests {
                 index: 1,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(0, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![-0.1, 0.1],
@@ -38,6 +40,7 @@ mod tests {
                 index: 2,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(0, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![0.1, -0.1],
@@ -47,6 +50,7 @@ mod tests {
                 index: 3,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(0, 1.0)]),
+                label_time: 1.0,
             },
         ];
 
@@ -60,6 +64,7 @@ mod tests {
                 index: 4,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(1, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![3.0, 3.0],
@@ -69,6 +74,7 @@ mod tests {
                 index: 5,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(1, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![-3.1, -2.9],
@@ -78,6 +84,7 @@ mod tests {
                 index: 6,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(1, 1.0)]),
+                label_time: 1.0,
             },
             Observer {
                 data: vec![3.1, 2.9],
@@ -87,6 +94,7 @@ mod tests {
                 index: 7,
                 local_threshold: 0.0,
                 label_observations: HashMap::from([(1, 1.0)]),
+                label_time: 1.0,
             },
         ];
 
@@ -148,6 +156,7 @@ mod tests {
             index: 0,
             local_threshold: 0.0,
             label_observations: HashMap::from([(0, 1.0)]),
+            label_time: 1.0,
         };
         obs_set.insert(single_obs);
 

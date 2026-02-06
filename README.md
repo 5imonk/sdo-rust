@@ -104,7 +104,8 @@ labels = clusterer.fit_predict(X)
 
 ## Documentation
 
-For detailed documentation, see [README_PYTHON.md](README_PYTHON.md).
+For detailed documentation, see [README_PYTHON.md](README_PYTHON.md).  
+For profiling the Rust implementation (Flamegraphs), see [PROFILING.md](PROFILING.md).
 
 ## Examples
 
