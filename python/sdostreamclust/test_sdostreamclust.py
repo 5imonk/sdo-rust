@@ -32,7 +32,7 @@ def test_sdostreamclust_integration():
     print("=" * 60)
     np.random.seed(42)
     sdostreamclust = SDOstreamclust(
-        k=10, x=3, t_fading=20.0,
+        k=10, x=3, t_fading=20.0, t_sampling=20.0,
         chi_min=1, chi_prop=0.1, zeta=0.5, min_cluster_size=2,
         dimension=2,
     )
@@ -76,7 +76,7 @@ def test_basic_streaming_clustering():
     cluster2 = np.random.randn(5, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = MinMaxScaler().fit_transform(np.vstack([cluster1, cluster2]).astype(np.float64))
     model = SDOstreamclust(
-        k=10, x=3, t_fading=10.0,
+        k=10, x=3, t_fading=10.0, t_sampling=10.0,
         chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
         data=init_data,
     )
@@ -104,6 +104,59 @@ def test_basic_streaming_clustering():
     return True
 
 
+def test_t_sampling_reflection():
+    """t_sampling wird an SDOstream durchgereicht und über get_t_sampling() abrufbar."""
+    print("\n" + "=" * 60)
+    print("Test 3b: t_sampling Reflection (SDOstreamclust)")
+    print("=" * 60)
+    np.random.seed(42)
+    t_sampling = 300.0
+    model = SDOstreamclust(
+        k=10, x=3, t_fading=50.0, t_sampling=t_sampling,
+        chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
+        dimension=2,
+    )
+    assert abs(model.get_t_sampling() - t_sampling) < 1e-9, (
+        f"t_sampling über get_t_sampling(): erwartet {t_sampling}, erhalten {model.get_t_sampling()}"
+    )
+    print("✓ Test 3b bestanden")
+    return True
+
+
+def test_t_sampling_affects_replacement_rate_sdostreamclust():
+    """Gleiche Daten/Zeiten: kleineres t_sampling → mehr Ersetzungen (über inneren SDOstream)."""
+    print("\n" + "=" * 60)
+    print("Test 3c: t_sampling Verhalten (SDOstreamclust)")
+    print("=" * 60)
+    np.random.seed(42)
+    n_points = 120
+    times = np.arange(n_points, dtype=np.float64) * 1.5
+    points = np.random.rand(n_points, 2).astype(np.float64)
+
+    model_low = SDOstreamclust(
+        k=25, x=4, t_fading=80.0, t_sampling=15.0,
+        chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
+        dimension=2,
+    )
+    model_high = SDOstreamclust(
+        k=25, x=4, t_fading=80.0, t_sampling=4000.0,
+        chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
+        dimension=2,
+    )
+
+    model_low.learn(points, time=times)
+    model_high.learn(points, time=times)
+
+    count_low = model_low.get_replacement_count()
+    count_high = model_high.get_replacement_count()
+    assert count_low > count_high, (
+        f"Kleines t_sampling sollte mehr Ersetzungen liefern: low={count_low}, high={count_high}"
+    )
+    print(f"  Ersetzungen (t_sampling=15): {count_low}, (t_sampling=4000): {count_high}")
+    print("✓ Test 3c bestanden")
+    return True
+
+
 def test_cluster_evolution():
     """SDOstreamclust: Cluster-Evolution über Zeit."""
     print("\n" + "=" * 60)
@@ -113,7 +166,7 @@ def test_cluster_evolution():
     scaler = MinMaxScaler()
     init_data = scaler.fit_transform(np.random.randn(10, 2).astype(np.float64))
     model = SDOstreamclust(
-        k=3, x=2, t_fading=10.0,
+        k=3, x=2, t_fading=10.0, t_sampling=10.0,
         chi_min=1, chi_prop=0.05, zeta=0.5, min_cluster_size=2,
         data=init_data,
     )
@@ -145,6 +198,8 @@ def main():
         test_sdostreamclust_integration,
         test_basic_streaming_clustering,
         test_cluster_evolution,
+        test_t_sampling_reflection,
+        test_t_sampling_affects_replacement_rate_sdostreamclust,
     ]
     passed = 0
     for test_func in tests:

@@ -31,7 +31,7 @@ def test_dimension_only_initialization():
     np.random.seed(42)
     k, x, dimension = 5, 3, 2
     t_fading = 10.0
-    sdostream = SDOstream(k=k, x=x, t_fading=t_fading, dimension=dimension)
+    sdostream = SDOstream(k=k, x=x, t_fading=t_fading, t_sampling=t_fading, dimension=dimension)
     assert sdostream.k == k and sdostream.x == x
     # dimension-only init generates k random points → data_points_processed == k
     assert sdostream.observer_count == k and sdostream.data_points_processed == k
@@ -49,7 +49,7 @@ def test_basic_streaming_controlled():
     print("=" * 60)
     np.random.seed(42)
     init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
-    sdostream = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    sdostream = SDOstream(k=3, x=2, t_fading=1000.0, t_sampling=1000.0, data=init_data)
     test_points = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.2, 0.2]], dtype=np.float64)
     
     # Batch-Predict vor Learn
@@ -79,7 +79,7 @@ def test_basic_streaming():
     cluster1 = np.random.randn(5, 2) * 0.5 + np.array([2.0, 2.0])
     cluster2 = np.random.randn(5, 2) * 0.5 + np.array([8.0, 8.0])
     init_data = MinMaxScaler().fit_transform(np.vstack([cluster1, cluster2]).astype(np.float64))
-    sdostream = SDOstream(k=10, x=5, t_fading=10.0, data=init_data)
+    sdostream = SDOstream(k=10, x=5, t_fading=10.0, t_sampling=10.0, data=init_data)
     
     # Batch-Verarbeitung für alle Punkte
     test_points = np.array([[2.0, 2.0], [8.0, 8.0], [2.5, 2.5], [8.5, 8.5], [15.0, 15.0]], dtype=np.float64)
@@ -98,7 +98,7 @@ def test_cluster_evolution():
     print("=" * 60)
     np.random.seed(42)
     init_data = MinMaxScaler().fit_transform(np.random.randn(10, 2).astype(np.float64))
-    sdostream = SDOstream(k=3, x=2, t_fading=10.0, data=init_data)
+    sdostream = SDOstream(k=3, x=2, t_fading=10.0, t_sampling=10.0, data=init_data)
     
     # Batch-Verarbeitung für jede Phase
     phases = [
@@ -128,7 +128,7 @@ def test_observation_updates():
     init_data = np.array([
         [0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [5.0, 5.0], [6.0, 6.0],
     ], dtype=np.float64)
-    sdostream = SDOstream(k=5, x=3, t_fading=1000.0, rho=0.4, data=init_data)
+    sdostream = SDOstream(k=5, x=3, t_fading=1000.0, t_sampling=1000.0, rho=0.4, data=init_data)
     initial_obs = [sdostream.get_observer_info(i)[0] for i in range(5)]
     
     # Batch-Learn für 20 Punkte
@@ -148,6 +148,53 @@ def test_observation_updates():
     return True
 
 
+def test_t_sampling_reflection():
+    """t_sampling wird gespeichert und über Getter zurückgegeben (Reflection)."""
+    print("\n" + "=" * 60)
+    print("Test 5b: t_sampling Reflection")
+    print("=" * 60)
+    np.random.seed(42)
+    t_sampling = 200.0
+    sdostream = SDOstream(
+        k=10, x=3, t_fading=100.0, t_sampling=t_sampling, dimension=2
+    )
+    assert abs(sdostream.t_sampling - t_sampling) < 1e-9, (
+        f"t_sampling Getter: erwartet {t_sampling}, erhalten {sdostream.t_sampling}"
+    )
+    print("✓ Test 5b bestanden")
+    return True
+
+
+def test_t_sampling_affects_replacement_rate():
+    """Gleiche Daten/Zeiten: kleineres t_sampling → mehr Ersetzungen (Verhalten)."""
+    print("\n" + "=" * 60)
+    print("Test 5c: t_sampling Verhalten (Ersetzungsrate)")
+    print("=" * 60)
+    np.random.seed(42)
+    n_points = 150
+    times = np.arange(n_points, dtype=np.float64) * 2.0
+    points = np.random.rand(n_points, 2).astype(np.float64)
+
+    model_low = SDOstream(
+        k=30, x=4, t_fading=100.0, t_sampling=10.0, dimension=2
+    )
+    model_high = SDOstream(
+        k=30, x=4, t_fading=100.0, t_sampling=5000.0, dimension=2
+    )
+
+    model_low.learn(points, time=times)
+    model_high.learn(points, time=times)
+
+    count_low = model_low.replacement_count
+    count_high = model_high.replacement_count
+    assert count_low > count_high, (
+        f"Kleines t_sampling sollte mehr Ersetzungen liefern: low={count_low}, high={count_high}"
+    )
+    print(f"  Ersetzungen (t_sampling=10): {count_low}, (t_sampling=5000): {count_high}")
+    print("✓ Test 5c bestanden")
+    return True
+
+
 def test_different_parameters():
     """Verschiedene Parameter (t_fading)."""
     print("\n" + "=" * 60)
@@ -161,7 +208,7 @@ def test_different_parameters():
         ]).astype(np.float64)
     )
     for t_fading in (5.0, 10.0, 20.0):
-        sdostream = SDOstream(k=3, x=2, t_fading=t_fading, data=init_data)
+        sdostream = SDOstream(k=3, x=2, t_fading=t_fading, t_sampling=t_fading, data=init_data)
         # Verwende predict mit mehreren Punkten (gibt Liste zurück)
         test_points = np.array([[2.0, 2.0], [3.0, 3.0], [4.0, 4.0]], dtype=np.float64)
         scores = sdostream.predict(test_points)
@@ -177,7 +224,7 @@ def test_predict_batch():
     print("=" * 60)
     np.random.seed(42)
     init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
-    sdostream = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    sdostream = SDOstream(k=3, x=2, t_fading=1000.0, t_sampling=1000.0, data=init_data)
     
     # Test mit mehreren Punkten
     test_points = np.array([
@@ -211,8 +258,8 @@ def test_learn_batch():
     print("=" * 60)
     np.random.seed(42)
     init_data = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
-    sdostream1 = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
-    sdostream2 = SDOstream(k=3, x=2, t_fading=1000.0, data=init_data)
+    sdostream1 = SDOstream(k=3, x=2, t_fading=1000.0, t_sampling=1000.0, data=init_data)
+    sdostream2 = SDOstream(k=3, x=2, t_fading=1000.0, t_sampling=1000.0, data=init_data)
     
     # Test-Punkte
     test_points = np.array([
@@ -255,7 +302,7 @@ def test_cluster_evolution_batch():
     print("=" * 60)
     np.random.seed(42)
     init_data = MinMaxScaler().fit_transform(np.random.randn(10, 2).astype(np.float64))
-    sdostream = SDOstream(k=3, x=2, t_fading=10.0, data=init_data)
+    sdostream = SDOstream(k=3, x=2, t_fading=10.0, t_sampling=10.0, data=init_data)
     
     # Verwende Batch-APIs für jede Phase (learn gibt Liste zurück für mehrere Punkte)
     phases = [
@@ -291,6 +338,8 @@ def main():
         test_basic_streaming,
         test_cluster_evolution,
         test_observation_updates,
+        test_t_sampling_reflection,
+        test_t_sampling_affects_replacement_rate,
         test_different_parameters,
         test_predict_batch,
         test_learn_batch,

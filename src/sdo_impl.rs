@@ -105,6 +105,16 @@ impl SDO {
 }
 
 impl SDO {
+    /// Gibt k zurück (für SDOstream etc.)
+    pub(crate) fn get_k(&self) -> usize {
+        self.k
+    }
+
+    /// Gibt rho zurück (für SDOstream etc.)
+    pub(crate) fn get_rho(&self) -> f64 {
+        self.rho
+    }
+
     pub(crate) fn learn_impl(&mut self, data: &Vec<Vec<f64>>) {
         // Schritt 1: Sample
         let mut rng = thread_rng();

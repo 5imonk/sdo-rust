@@ -26,47 +26,40 @@ impl SDOstream {
 pub struct SDOstream {
     sdo: SDO,                     // Basis SDO-Implementierung
     fading: f64,                  // f = exp(-T^-1)
+    sampling_rate: f64, // Sampling-Rate (durchschnittliches Intervall zwischen Ersetzungen)
     data_points_processed: usize, // Zähler für Sampling
-    k: usize,                     // Anzahl der Observer (Modellgröße)
-    t_fading: f64,                // T-Parameter für fading: f = exp(-T_fading^-1)
-    t_sampling: f64, // T-Parameter für Sampling-Rate (durchschnittliches Intervall zwischen Ersetzungen)
-    rho: f64,        // Rho-Parameter (für num_active Berechnung)
     use_explicit_time: bool, // Wenn true, erwartet learn() time-Parameter; sonst auto-increment
     last_replacement_time: f64, // Zeit der letzten Prüfung/Ersetzung (für Lazy Replacement)
     pending_replacements: usize, // Anzahl der ausstehenden Ersetzungen (wenn num_replacements > 1)
+    replacement_count: usize, // Anzahl durchgeführter Ersetzungen (für Tests / Beobachtung)
 }
 
 #[pymethods]
 #[allow(clippy::too_many_arguments)]
 impl SDOstream {
     #[new]
-    #[pyo3(signature = (k, x, t_fading, t_sampling = None, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None))]
+    #[pyo3(signature = (k, t_fading, t_sampling, x, rho = 0.1, distance = "euclidean".to_string(), minkowski_p = None, dimension = None, data = None, time = None))]
     pub fn new(
         k: usize,
-        x: usize,
         t_fading: f64,
-        t_sampling: Option<f64>,
+        t_sampling: f64,
+        x: usize,
+        rho: f64,
         distance: String,
         minkowski_p: Option<f64>,
-        rho: f64,
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Self> {
-        // t_sampling default ist t_fading wenn nicht angegeben
-        let t_sampling_value = t_sampling.unwrap_or(t_fading);
-
         let mut instance = Self {
             sdo: SDO::new(k, x, rho, distance, minkowski_p),
             fading: Self::get_fading_static(t_fading),
+            sampling_rate: t_sampling / (k as f64),
             data_points_processed: 0,
-            k,
-            t_fading,
-            t_sampling: t_sampling_value,
-            rho,
             use_explicit_time: time.is_some(), // Default: auto-increment
             last_replacement_time: 0.0,        // Startzeit für Lazy Replacement
             pending_replacements: 0,           // Keine ausstehenden Ersetzungen
+            replacement_count: 0,
         };
 
         instance.initialize(dimension, data, time)?;
@@ -159,19 +152,25 @@ impl SDOstream {
     /// Gibt k zurück (Anzahl der Observer)
     #[getter]
     pub fn k(&self) -> usize {
-        self.k
+        self.sdo.get_k()
     }
 
-    /// Gibt t_fading zurück
+    // gib rho zurück
     #[getter]
-    pub fn t_fading(&self) -> f64 {
-        self.t_fading
+    pub fn rho(&self) -> f64 {
+        self.sdo.get_rho()
     }
 
     /// Gibt t_sampling zurück
     #[getter]
     pub fn t_sampling(&self) -> f64 {
-        self.t_sampling
+        self.sampling_rate * (self.sdo.get_k() as f64)
+    }
+
+    // Gibt t_fading zurück
+    #[getter]
+    pub fn t_fading(&self) -> f64 {
+        -1.0 / self.fading.ln()
     }
 
     /// Gibt Anzahl der Observer zurück
@@ -190,6 +189,12 @@ impl SDOstream {
     #[getter]
     pub fn data_points_processed(&self) -> usize {
         self.data_points_processed
+    }
+
+    /// Anzahl durchgeführter Observer-Ersetzungen (für Tests / Beobachtung).
+    #[getter]
+    pub fn replacement_count(&self) -> usize {
+        self.replacement_count
     }
 
     /// Gibt Observer-Informationen für einen bestimmten Index zurück
@@ -266,7 +271,7 @@ impl SDOstream {
                 existing_data.clone() // Clone the user's data
             }
             // Case 2: No data provided but dimension specified → uniform in unit square [0,1]^d
-            (None, Some(dim)) => sample_random_matrix_uniform_unit(dim, self.k),
+            (None, Some(dim)) => sample_random_matrix_uniform_unit(dim, self.k()),
             // Case 3: No data and no dimension → initialize empty
             (None, None) => {
                 self.sdo.observers.set_num_active(0);
@@ -291,9 +296,9 @@ impl SDOstream {
         }
 
         // Setze num_active basierend auf rho
-        self.sdo
-            .observers
-            .set_num_active(((self.sdo.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
+        self.sdo.observers.set_num_active(
+            ((self.sdo.observers.len() as f64) * (1.0 - self.rho())).ceil() as usize,
+        );
 
         // Initialisiere Lazy Replacement: Startzeit setzen
         self.last_replacement_time = time;
@@ -373,8 +378,7 @@ impl SDOstream {
                 "Ungültige Zeit: current time muss größer oder gleich last_replacement_time sein"
             );
         }
-        let effective_sampling_interval = self.t_sampling / (self.k as f64);
-        let lambda_events = elapsed / effective_sampling_interval;
+        let lambda_events = elapsed / self.sampling_rate;
         let num_replacements = self.sample_poisson(lambda_events);
         let total_replacements = num_replacements + self.pending_replacements;
         if total_replacements == 0 {
@@ -470,10 +474,8 @@ impl SDOstream {
             );
         }
 
-        // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / t_sampling
-        // t_sampling ist das durchschnittliche Intervall zwischen Ersetzungen
-        let effective_sampling_interval = self.t_sampling / (self.k as f64);
-        let lambda_events = elapsed / effective_sampling_interval;
+        // Erwartete Anzahl von Ersetzungen in elapsed Zeit: λ_events = elapsed / sampling_rate
+        let lambda_events = elapsed / self.sampling_rate;
 
         // Simuliere Poisson-Anzahl von Ersetzungen
         let num_replacements = self.sample_poisson(lambda_events);
@@ -546,6 +548,7 @@ impl SDOstream {
         point: &[f64],
         time: f64,
     ) -> Option<usize> {
+        self.replacement_count += 1;
         let new_index = self.data_points_processed;
         let new_observer = Observer {
             data: point.to_vec(),
@@ -586,16 +589,17 @@ impl Default for SDOstream {
     fn default() -> Self {
         Self::new(
             200,
-            5,
             100.0,
-            None, // t_sampling = t_fading
+            100.0,
+            5,
+            0.1,
             "euclidean".to_string(),
             None,
-            0.1,
-            None,
+            Some(2),
             None,
             None,
         )
-        .unwrap()
+        .expect("SDOstream::default()")
     }
 }
+

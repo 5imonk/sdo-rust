@@ -93,7 +93,7 @@ def main():
     if x.shape[1] < 2:
         print("Visualisierung nur für mind. 2 Dimensionen; nur ARI wird ausgegeben.")
 
-    model = SDOclust(k=200, x=4, rho=0.2, chi=7, zeta=0.1, min_cluster_size=2)
+    model = SDOclust(k=200, x=4, rho=0.1, chi=9, zeta=0.1, min_cluster_size=3)
     model.learn(x)
 
     # Debug: Gefundene Connected Components (ohne Labels) ausgeben

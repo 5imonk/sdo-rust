@@ -1,4 +1,4 @@
-use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -20,19 +20,19 @@ pub struct SDOstreamclust {
 #[allow(clippy::too_many_arguments)]
 impl SDOstreamclust {
     #[new]
-    #[pyo3(signature = (k, x, t_fading, t_sampling = None, chi_min = 1, chi_prop = 0.05, zeta = 0.6, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, rho = 0.1, dimension = None, data = None, time = None))]
+    #[pyo3(signature = (k, t_fading, t_sampling, x, rho = 0.1, chi_min = 1, chi_prop = 0.05, zeta = 0.6, min_cluster_size = 2, distance = "euclidean".to_string(), minkowski_p = None, dimension = None, data = None, time = None))]
     pub fn new(
         k: usize,
-        x: usize,
         t_fading: f64,
-        t_sampling: Option<f64>,
+        t_sampling: f64,
+        x: usize,
+        rho: f64,
         chi_min: usize,
         chi_prop: f64,
         zeta: f64,
         min_cluster_size: usize,
         distance: String,
         minkowski_p: Option<f64>,
-        rho: f64,
         dimension: Option<usize>,
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
@@ -44,6 +44,10 @@ impl SDOstreamclust {
             ));
         }
 
+        if chi_min < 1 {
+            return Err(PyErr::new::<PyValueError, _>("chi_min must be at least 1"));
+        }
+
         if !(0.0..=1.0).contains(&zeta) {
             return Err(PyErr::new::<PyValueError, _>(
                 "zeta must be between 0.0 and 1.0",
@@ -53,17 +57,17 @@ impl SDOstreamclust {
         Ok(Self {
             sdostream: SDOstream::new(
                 k,
-                x,
                 t_fading,
                 t_sampling,
+                x,
+                rho,
                 distance,
                 minkowski_p,
-                rho,
                 dimension,
                 data,
                 time,
             )?,
-            chi: ((chi_min as f64).max(chi_prop * k as f64) as usize).max(1),
+            chi: ((chi_min as f64).max(chi_prop * (1.0 - rho) * k as f64) as usize),
             zeta,
             min_cluster_size,
         })
@@ -113,6 +117,57 @@ impl SDOstreamclust {
             .iter_observers(true)
             .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
             .collect()
+    }
+
+    /// Gibt aktive Observer inkl. finaler Threshold-Radien für Visualisierung.
+    /// Returns (points, labels, final_threshold_radii) mit final = zeta * local + (1-zeta) * global.
+    pub fn get_active_observers_with_final_thresholds(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PyArray2<f64>>, Vec<i32>, Vec<f64>)> {
+        let active_observers = self.sdostream.get_sdo().observers.get_observers(true);
+        if active_observers.is_empty() {
+            let empty = PyArray2::zeros_bound(py, (0, 0), false);
+            return Ok((empty.unbind(), vec![], vec![]));
+        }
+
+        let local_thresholds: Vec<f64> =
+            active_observers.iter().map(|o| o.local_threshold).collect();
+        let global_threshold = local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
+        let zeta = self.zeta;
+        let final_radii: Vec<f64> = local_thresholds
+            .iter()
+            .map(|h| zeta * h + (1.0 - zeta) * global_threshold)
+            .collect();
+
+        let labels: Vec<i32> = active_observers
+            .iter()
+            .map(|o| o.get_label().map(|l| l as i32).unwrap_or(-1))
+            .collect();
+
+        let rows = active_observers.len();
+        let cols = active_observers[0].data.len();
+        let array = PyArray2::zeros_bound(py, (rows, cols), false);
+        unsafe {
+            let mut arr = array.as_array_mut();
+            for (i, obs) in active_observers.iter().enumerate() {
+                for (j, &v) in obs.data.iter().enumerate() {
+                    arr[[i, j]] = v;
+                }
+            }
+        }
+
+        Ok((array.unbind(), labels, final_radii))
+    }
+
+    /// t_sampling des inneren SDOstream (für Tests/Reflection).
+    pub fn get_t_sampling(&self) -> f64 {
+        self.sdostream.t_sampling()
+    }
+
+    /// replacement_count des inneren SDOstream (für Tests/Verhalten).
+    pub fn get_replacement_count(&self) -> usize {
+        self.sdostream.replacement_count()
     }
 }
 
@@ -189,11 +244,6 @@ impl SDOstreamclust {
             .map(|(&label, _)| label as i32)
             .unwrap_or(-1); // -1 wenn keine Beobachtungen
         predicted_label
-    }
-
-    /// Gibt eine Referenz auf das interne SDOstream-Objekt zurück
-    pub fn get_sdostream(&self) -> &SDOstream {
-        &self.sdostream
     }
 
     /// Gibt eine mutable Referenz auf das interne SDOstream-Objekt zurück

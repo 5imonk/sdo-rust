@@ -13,6 +13,7 @@ from sdo import SDOstreamclust
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 
@@ -59,8 +60,8 @@ def load_data(filename):
     return t,x,y,n,m,clusters,outliers,dataname
 
 def get_observers_info(classifier):
-    """Extrahiert alle aktiven Observer-Positionen und Labels (API: get_active_observers, get_observer_labels)."""
-    return get_observers_and_labels(classifier)
+    """Extrahiert alle aktiven Observer-Positionen, Labels und (falls verfügbar) finale Threshold-Radien."""
+    return get_observers_and_labels(classifier, with_final_threshold_radii=True)
 
 def get_all_observers_info(classifier):
     """Sammelt alle Observer-Informationen (aktiv + inaktiv)"""
@@ -165,30 +166,30 @@ block_size = 50  # Remaining blocks will have this size
 
 # Controls the time window of ground truth / predictions points shown at each frame: obs_T +/- (T / f_T), 
 # obs_T is time of model (observer) snapshot
-f_T = 20
+f_T = 50
 
-k = 500 # Model size
+k = 800 # Model size
 T = 1000 # Time Horizon (wird zu t_fading)
+T_sampling = 2000 # Sampling Interval (more frequent updates)
 # Parameter-Mapping:
 # T -> t_fading
 # qv -> rho (Anteil inaktiver Observer, also rho = 1 - qv)
 # e -> min_cluster_size
-qv = 0.2
-rho = 1 - qv  # rho = 0.8 bedeutet 80% aktive Observer
-e = 1
+rho = 0.2 # rho = 0.8 bedeutet 80% aktive Observer
+e = 5
 min_cluster_size = e
-chi_prop = 0.05
+chi_prop = 0.015
 chi_min = 1
 zeta = 0.7
 # outlier_threshold und outlier_handling nicht direkt verfügbar - Outlier-Detection über Labels -1
-x_ = 4
+x_ = 3
 
 # Initialisiere SDOstreamclust mit dimension statt Warmup-Daten
 classifier = SDOstreamclust(
     k=k, 
     x=x_, 
     t_fading=T,  # T -> t_fading
-    t_sampling=None,  # Default: t_sampling = t_fading
+    t_sampling=T_sampling,
     chi_min=chi_min,
     chi_prop=chi_prop, 
     zeta=zeta,
@@ -202,12 +203,14 @@ all_scores = []
 
 all_obs_points = []
 all_obs_labels = []
+all_obs_radii = []
 all_obs_t = []
 
 # Observer-Informationen vor dem ersten Block
-obs_points, obs_labels = get_observers_info(classifier)
+obs_points, obs_labels, obs_radii = get_observers_info(classifier)
 all_obs_points.append(obs_points)
 all_obs_labels.append(obs_labels)
+all_obs_radii.append(obs_radii)
 all_obs_t.append(t[0])
 
 # CSV-Ausgabe aller Observer-Informationen
@@ -232,9 +235,10 @@ else:
         all_scores.append(score)
 
 # Observer-Informationen nach dem ersten Block
-obs_points, obs_labels = get_observers_info(classifier)
+obs_points, obs_labels, obs_radii = get_observers_info(classifier)
 all_obs_points.append(obs_points)
 all_obs_labels.append(obs_labels)
+all_obs_radii.append(obs_radii)
 all_obs_t.append(chunk_time[-1])
 
 # CSV-Ausgabe aller Observer-Informationen
@@ -260,9 +264,10 @@ for i in range(first_block_size, x.shape[0], block_size):
             all_scores.append(score)
     
     # Observer-Informationen nach jedem Block
-    obs_points, obs_labels = get_observers_info(classifier)
+    obs_points, obs_labels, obs_radii = get_observers_info(classifier)
     all_obs_points.append(obs_points)
     all_obs_labels.append(obs_labels)
+    all_obs_radii.append(obs_radii)
     all_obs_t.append(chunk_time[-1])
     
     # CSV-Ausgabe aller Observer-Informationen
@@ -326,7 +331,7 @@ frame_files = []
 with_pred = False
 
 # Plot and save each frame
-for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_obs_labels, all_obs_t)):
+for idx, (obs_points, obs_labels, obs_radii, obs_t) in enumerate(zip(all_obs_points, all_obs_labels, all_obs_radii, all_obs_t)):
 
     # Plot filtered points with corresponding shapes
     time_min = obs_t - T/f_T
@@ -372,6 +377,17 @@ for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_ob
                 # If some labels are not in encoder, use them as-is (shouldn't happen, but safety check)
                 labels = obs_labels_int
 
+            # Draw transparent circles (final threshold radii) behind observer points if available
+            if obs_radii is not None and len(obs_radii) == len(points):
+                for i_pt in range(len(points)):
+                    if labels[i_pt] == -1:
+                        continue
+                    color = cmap(norm(int(labels[i_pt])))
+                    r = float(obs_radii[i_pt])
+                    axes[1].add_patch(
+                        Circle((points[i_pt, 0], points[i_pt, 1]), r, facecolor=color, edgecolor="none", alpha=0.15, zorder=1)
+                    )
+
             for label in np.unique(labels):
                 if label != -1:
                     shape = marker_shapes[label % num_shapes]  # Use filtered_labels for marker shapes
@@ -390,6 +406,7 @@ for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_ob
         axes[1].set_ylabel('Feature 1')
         axes[1].set_xlim(0, 1)
         axes[1].set_ylim(0, 1)
+        axes[1].set_aspect('equal')
 
         
         for label in np.unique(filtered_gt_labels):
@@ -447,6 +464,17 @@ for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_ob
                 # If some labels are not in encoder, use them as-is (shouldn't happen, but safety check)
                 labels = obs_labels_int
 
+            # Draw transparent circles (final threshold radii) behind observer points if available
+            if obs_radii is not None and len(obs_radii) == len(points):
+                for i_pt in range(len(points)):
+                    if labels[i_pt] == -1:
+                        continue
+                    color = cmap(norm(int(labels[i_pt])))
+                    r = float(obs_radii[i_pt])
+                    axes[1].add_patch(
+                        Circle((points[i_pt, 0], points[i_pt, 1]), r, facecolor=color, edgecolor="none", alpha=0.15, zorder=1)
+                    )
+
             for label in np.unique(labels):
                 if label != -1:
                     shape = marker_shapes[label % num_shapes]
@@ -463,6 +491,7 @@ for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_ob
         axes[1].set_ylabel('f1')
         axes[1].set_xlim(0, 1)
         axes[1].set_ylim(0, 1)
+        axes[1].set_aspect('equal')
 
     plt.tight_layout()
     # Save the frame
@@ -470,8 +499,6 @@ for idx, (obs_points, obs_labels, obs_t) in enumerate(zip(all_obs_points, all_ob
     plt.savefig(frame_file)
     frame_files.append(frame_file)
 
-    frame_file_eps = os.path.join(frames_dir, f'frame_{idx:04d}.eps')
-    plt.savefig(frame_file_eps)  # This saves the file as EPS
     plt.close(fig)
 
 if with_pred:
@@ -555,8 +582,6 @@ frame_file = os.path.join(frames_dir, f'frame_{idx+1:04d}.png')
 plt.savefig(frame_file)
 frame_files.append(frame_file)
 
-frame_file_eps = os.path.join(frames_dir, f'frame_{idx+1:04d}.eps')
-plt.savefig(frame_file_eps)  # Save as EPS
 plt.close(fig)
 
 # Create a video from the saved frames
