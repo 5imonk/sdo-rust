@@ -1,9 +1,45 @@
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::distance_matrix::DistanceMatrix;
 use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
 use crate::utils::{compute_distance, DistanceMetric};
+
+/// Wrapper for k-nearest heap: max-heap by distance (worst at top), O(log k) push/pop.
+#[derive(Clone)]
+struct WorstFirst(NeighborInfo);
+impl PartialEq for WorstFirst {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.distance == other.0.distance
+    }
+}
+impl Eq for WorstFirst {}
+impl PartialOrd for WorstFirst {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for WorstFirst {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .distance
+            .partial_cmp(&other.0.distance)
+            .unwrap_or(Ordering::Equal)
+    }
+}
+
+/// Maintains at most k_nearest elements; replaces worst when a closer candidate is found. O(log k) per update.
+fn heap_push_k_nearest(heap: &mut BinaryHeap<WorstFirst>, neighbor: NeighborInfo, k_limit: usize) {
+    if heap.len() < k_limit {
+        heap.push(WorstFirst(neighbor));
+    } else if let Some(worst) = heap.peek() {
+        if neighbor.distance < worst.0.distance {
+            heap.pop();
+            heap.push(WorstFirst(neighbor));
+        }
+    }
+}
 
 /// Efficient ObserverSet with dual indexing for O(log n) operations
 /// Uses Brute-Force for k-NN operations (Tree support disabled)
@@ -447,6 +483,7 @@ impl ObserverSet {
     /// Returns (active_neighbors, all_neighbors) where:
     /// - active_neighbors: k-nearest active neighbors only
     /// - all_neighbors: k-nearest neighbors regardless of active status, only if learn is set and true, otherwise None
+    /// Uses heaps for O(k log k) per point instead of O(k²).
     pub fn search_neighbors_unified(
         &self,
         query_point: &[f64],
@@ -454,83 +491,129 @@ impl ObserverSet {
         learn: Option<bool>,
         k_learn: Option<usize>,
     ) -> (Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
-        let mut nearest_active = Vec::with_capacity(k);
-        // Determine k for nearest_all: use k_learn if provided, otherwise fall back to k
         let k_all = k_learn.unwrap_or(0) + k;
-        let mut nearest_all = if let Some(flag) = learn {
-            if flag {
-                Some(Vec::with_capacity(k_all))
-            } else {
-                None
-            }
+        let mut nearest_active_heap: BinaryHeap<WorstFirst> = BinaryHeap::with_capacity(k + 1);
+        let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
+            Some(BinaryHeap::with_capacity(k_all + 1))
         } else {
             None
         };
 
-        // Helper function to update k-nearest vectors with worst candidate replacement
-        let update_k_nearest =
-            |candidates: &mut Vec<NeighborInfo>, neighbor_info: NeighborInfo, k_limit: usize| {
-                if candidates.len() < k_limit {
-                    candidates.push(neighbor_info);
-                } else {
-                    // Find worst candidate (max distance)
-                    let worst_idx = candidates
-                        .iter()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| a.distance.partial_cmp(&b.distance).unwrap())
-                        .map(|(idx, _)| idx)
-                        .unwrap();
-
-                    // Replace if new neighbor is closer than current worst
-                    if neighbor_info.distance < candidates[worst_idx].distance {
-                        candidates[worst_idx] = neighbor_info;
-                    }
-                }
-            };
-
-        // Single pass through sorted observers
         for (position, obs_key) in self.indices_by_obs.iter().enumerate() {
             let observer = match self.observers_by_index.get(&obs_key.index) {
                 Some(obs) => obs,
                 None => continue,
             };
-
-            // Determine active status from position in sorted order
             let is_active = position < self.num_active;
-
-            // Break if learn is false or not set and this one is inactive
             if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
                 break;
             }
 
-            // Compute distance once
             let distance = compute_distance(
                 &observer.data,
                 query_point,
                 self.distance_metric,
                 self.minkowski_p,
             );
-
             let neighbor_info = NeighborInfo {
                 index: obs_key.index,
                 distance,
                 is_active,
             };
 
-            // Update nearest (all observers if learn is Some(true))
             if let Some(true) = learn {
-                if let Some(ref mut all_vec) = nearest_all {
-                    update_k_nearest(all_vec, neighbor_info.clone(), k_all);
+                if let Some(ref mut heap) = nearest_all_heap {
+                    heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
                 }
             }
-
-            // Update nearest_active (only active observers)
             if is_active {
-                update_k_nearest(&mut nearest_active, neighbor_info, k);
+                heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
             }
         }
 
+        let nearest_active: Vec<NeighborInfo> = nearest_active_heap
+            .into_iter()
+            .map(|w| w.0)
+            .collect();
+        let nearest_all = nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
         (nearest_active, nearest_all)
+    }
+
+    /// Distanzmatrix: Zeilen = Punkte, Spalten = Observer in indices_by_obs-Reihenfolge.
+    /// dist[i][j] = Abstand von points[i] zum Observer an Position j.
+    fn compute_distance_matrix(&self, points: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|k| k.index).collect();
+        let n_obs = obs_order.len();
+        let mut dist = vec![vec![0.0; n_obs]; points.len()];
+        for (i, point) in points.iter().enumerate() {
+            for (j, &obs_index) in obs_order.iter().enumerate() {
+                let observer = match self.observers_by_index.get(&obs_index) {
+                    Some(obs) => obs,
+                    None => continue,
+                };
+                dist[i][j] = compute_distance(
+                    &observer.data,
+                    point,
+                    self.distance_metric,
+                    self.minkowski_p,
+                );
+            }
+        }
+        dist
+    }
+
+    /// Batch-Version von search_neighbors_unified: k-NN für mehrere Punkte in einem Aufruf.
+    /// Nutzt eine gemeinsame Distanzmatrix und Heap-basierte k-NN pro Punkt.
+    pub fn search_neighbors_unified_batch(
+        &self,
+        points: &[Vec<f64>],
+        k: usize,
+        learn: Option<bool>,
+        k_learn: Option<usize>,
+    ) -> Vec<(Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|k| k.index).collect();
+        let n_obs = obs_order.len();
+        let dist = self.compute_distance_matrix(points);
+        let k_all = k_learn.unwrap_or(0) + k;
+
+        let mut results = Vec::with_capacity(points.len());
+        for i in 0..points.len() {
+            let mut nearest_active_heap: BinaryHeap<WorstFirst> = BinaryHeap::with_capacity(k + 1);
+            let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
+                Some(BinaryHeap::with_capacity(k_all + 1))
+            } else {
+                None
+            };
+
+            for j in 0..n_obs {
+                let is_active = j < self.num_active;
+                if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
+                    break;
+                }
+                let neighbor_info = NeighborInfo {
+                    index: obs_order[j],
+                    distance: dist[i][j],
+                    is_active,
+                };
+                if let Some(true) = learn {
+                    if let Some(ref mut heap) = nearest_all_heap {
+                        heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
+                    }
+                }
+                if is_active {
+                    heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
+                }
+            }
+
+            let nearest_active: Vec<NeighborInfo> =
+                nearest_active_heap.into_iter().map(|w| w.0).collect();
+            let nearest_all = nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
+            results.push((nearest_active, nearest_all));
+        }
+        results
     }
 
     /// Distanz von einem Punkt zu einem Observer (für Wiederverwendung in SDOstream Step 4)

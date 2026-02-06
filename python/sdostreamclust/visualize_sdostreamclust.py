@@ -162,14 +162,14 @@ filename = os.path.join(_REPO_ROOT, "evaluation_tests", "data", "example", "conc
 t,x,y,n,m,clusters,outliers,dataname = load_data(filename)
 
 # Set the initial block to be of size k
-first_block_size = 25
-block_size = 200  # Remaining blocks will have this size
+first_block_size = 500
+block_size = 500  # Remaining blocks will have this size
 
 # Controls the time window of ground truth / predictions points shown at each frame: obs_T +/- (T / f_T), 
 # obs_T is time of model (observer) snapshot
 f_T = 200
 
-k = 800 # Model size
+k = 100 # Model size
 T = 1200 # Time Horizon (wird zu t_fading)
 T_sampling = 1800 # Sampling Interval (more frequent updates)
 # Parameter-Mapping:

@@ -192,16 +192,32 @@ impl SDO {
         (median, active_neighbors, all_neighbors_opt)
     }
 
-    /// Batch-Vorhersage (Rust-intern).
+    /// Batch-Vorhersage (Rust-intern). Nutzt search_neighbors_unified_batch für mehrere Punkte.
     pub(crate) fn predict_impl(
         &self,
-        points: &Vec<Vec<f64>>,
+        points: &[Vec<f64>],
         learn: Option<bool>,
         k_learn: Option<usize>,
     ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
-        points
-            .iter()
-            .map(|point| self.predict_point(point, learn, k_learn))
+        if points.is_empty() {
+            return Vec::new();
+        }
+        if self.observers.is_empty() {
+            panic!("No observers found during prediction!");
+        }
+        let batch = self
+            .observers
+            .search_neighbors_unified_batch(points, self.x, learn, k_learn);
+        batch
+            .into_iter()
+            .map(|(active_neighbors, all_neighbors_opt)| {
+                let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
+                if distances.is_empty() {
+                    panic!("No active observers found during prediction!");
+                }
+                let median = compute_median(&distances);
+                (median, active_neighbors, all_neighbors_opt)
+            })
             .collect()
     }
 
