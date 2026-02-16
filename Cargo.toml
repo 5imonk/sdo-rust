@@ -14,8 +14,10 @@ name = "sdo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+ahash = "0.8"
 rand = "0.8"
 rand_distr = "0.4"
+rayon = "1.10"
 pyo3 = { version = "0.21", features = ["auto-initialize", "extension-module"] }
 numpy = "0.21"
 
@@ -34,4 +36,8 @@ debug = true
 
 [[bench]]
 name = "optimization_benchmarks"
+harness = false
+
+[[bench]]
+name = "profiling_benchmarks"
 harness = false

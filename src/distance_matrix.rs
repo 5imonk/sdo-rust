@@ -5,6 +5,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ahash::AHashMap;
+
+use crate::distance_simd::compute_distances_row_euclidean;
 use crate::obs::Observer;
 use crate::utils::{compute_distance, DistanceMetric};
 
@@ -97,7 +100,7 @@ impl DistanceMatrix {
     pub(crate) fn insert(
         &mut self,
         new_observer: &Observer,
-        observers: &HashMap<usize, Arc<Observer>>,
+        observers: &AHashMap<usize, Arc<Observer>>,
     ) {
         let new_index = new_observer.index;
         let new_data = new_observer.data.as_slice();
@@ -156,21 +159,45 @@ impl DistanceMatrix {
     }
 
     /// Rebuild from scratch: one row per observer, distances between all pairs.
-    pub(crate) fn rebuild(&mut self, observers: &HashMap<usize, Arc<Observer>>) {
+    /// Uses SIMD for Euclidean metric.
+    pub(crate) fn rebuild(&mut self, observers: &AHashMap<usize, Arc<Observer>>) {
         self.rows.clear();
         let indices: Vec<usize> = observers.keys().copied().collect();
-        for &i in &indices {
-            let data_i = observers[&i].data.as_slice();
-            let mut row = DistanceRow::new();
-            for &j in &indices {
-                if i != j {
-                    let data_j = observers[&j].data.as_slice();
-                    let d =
-                        compute_distance(data_i, data_j, self.distance_metric, self.minkowski_p);
+
+        if self.distance_metric == DistanceMetric::Euclidean {
+            for &i in &indices {
+                let data_i = observers[&i].data.as_slice();
+                let other_indices: Vec<usize> = indices.iter().copied().filter(|&j| j != i).collect();
+                let other_refs: Vec<&[f64]> = other_indices
+                    .iter()
+                    .map(|&j| observers[&j].data.as_slice())
+                    .collect();
+                let observers_slice: &[&[f64]] = &other_refs[..];
+                let dists = compute_distances_row_euclidean(data_i, observers_slice);
+                let mut row = DistanceRow::new();
+                for (&j, &d) in other_indices.iter().zip(dists.iter()) {
                     row.insert(j, d);
                 }
+                self.rows.insert(i, row);
             }
-            self.rows.insert(i, row);
+        } else {
+            for &i in &indices {
+                let data_i = observers[&i].data.as_slice();
+                let mut row = DistanceRow::new();
+                for &j in &indices {
+                    if i != j {
+                        let data_j = observers[&j].data.as_slice();
+                        let d = compute_distance(
+                            data_i,
+                            data_j,
+                            self.distance_metric,
+                            self.minkowski_p,
+                        );
+                        row.insert(j, d);
+                    }
+                }
+                self.rows.insert(i, row);
+            }
         }
     }
 

@@ -2,7 +2,12 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use ahash::AHashMap;
+
+use rayon::prelude::*;
+
 use crate::distance_matrix::DistanceMatrix;
+use crate::distance_simd::compute_distances_row_euclidean;
 use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
 use crate::utils::{compute_distance, DistanceMetric};
 
@@ -47,7 +52,7 @@ fn heap_push_k_nearest(heap: &mut BinaryHeap<WorstFirst>, neighbor: NeighborInfo
 #[derive(Clone)]
 pub struct ObserverSet {
     // Primary storage: O(1) access by index, Arc for shared ownership
-    pub(crate) observers_by_index: HashMap<usize, Arc<Observer>>,
+    pub(crate) observers_by_index: AHashMap<usize, Arc<Observer>>,
 
     // Secondary index: sorted by observations (descending)
     // BTreeSet gives us O(log n) for min/max and sorted iteration, no redundant value
@@ -77,7 +82,7 @@ pub struct ObserverSet {
 impl ObserverSet {
     pub fn new(distance_metric: DistanceMetric, minkowski_p: Option<f64>) -> Self {
         Self {
-            observers_by_index: HashMap::new(),
+            observers_by_index: AHashMap::default(),
             indices_by_obs: BTreeSet::new(),
             indices_by_score: BTreeSet::new(),
             distance_metric: distance_metric,
@@ -120,6 +125,11 @@ impl ObserverSet {
     /// Rebuild the full distance matrix (e.g. for initial clustering).
     pub(crate) fn rebuild_distance_lists(&mut self) {
         self.distance_matrix.rebuild(&self.observers_by_index);
+    }
+    
+    /// Public version for benchmarks (always available)
+    pub fn rebuild_distance_lists_public(&mut self) {
+        self.rebuild_distance_lists();
     }
     /// Prüft, ob ein Observer aktiv ist (gehört zu den Top num_active Observern nach observations)
     /// Ein Observer ist aktiv, wenn seine observations >= observations des last_active_observer sind
@@ -541,29 +551,41 @@ impl ObserverSet {
 
     /// Distanzmatrix: Zeilen = Punkte, Spalten = Observer in indices_by_obs-Reihenfolge.
     /// dist[i][j] = Abstand von points[i] zum Observer an Position j.
+    /// Baut einmal ordered_data (kein HashMap im Hot Path). Euclidean nutzt SIMD.
     fn compute_distance_matrix(&self, points: &[Vec<f64>]) -> Vec<Vec<f64>> {
-        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|k| k.index).collect();
-        let n_obs = obs_order.len();
-        let mut dist = vec![vec![0.0; n_obs]; points.len()];
-        for (i, point) in points.iter().enumerate() {
-            for (j, &obs_index) in obs_order.iter().enumerate() {
-                let observer = match self.observers_by_index.get(&obs_index) {
-                    Some(obs) => obs,
-                    None => continue,
-                };
-                dist[i][j] = compute_distance(
-                    &observer.data,
-                    point,
-                    self.distance_metric,
-                    self.minkowski_p,
-                );
-            }
+        let ordered_data: Vec<&[f64]> = self
+            .indices_by_obs
+            .iter()
+            .filter_map(|k| {
+                self.observers_by_index
+                    .get(&k.index)
+                    .map(|o| o.data.as_slice())
+            })
+            .collect();
+        let observers_slice: &[&[f64]] = &ordered_data[..];
+        let metric = self.distance_metric;
+        let p = self.minkowski_p;
+
+        if metric == DistanceMetric::Euclidean {
+            points
+                .par_iter()
+                .map(|point| compute_distances_row_euclidean(point, observers_slice))
+                .collect()
+        } else {
+            points
+                .par_iter()
+                .map(|point| {
+                    ordered_data
+                        .iter()
+                        .map(|obs_data| compute_distance(obs_data, point, metric, p))
+                        .collect::<Vec<f64>>()
+                })
+                .collect()
         }
-        dist
     }
 
     /// Batch-Version von search_neighbors_unified: k-NN für mehrere Punkte in einem Aufruf.
-    /// Nutzt eine gemeinsame Distanzmatrix und Heap-basierte k-NN pro Punkt.
+    /// Nutzt eine gemeinsame Distanzmatrix (parallel + ggf. SIMD) und Heap-basierte k-NN pro Punkt (parallel).
     pub fn search_neighbors_unified_batch(
         &self,
         points: &[Vec<f64>],
@@ -574,46 +596,51 @@ impl ObserverSet {
         if points.is_empty() {
             return Vec::new();
         }
-        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|k| k.index).collect();
+        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|key| key.index).collect();
         let n_obs = obs_order.len();
         let dist = self.compute_distance_matrix(points);
         let k_all = k_learn.unwrap_or(0) + k;
+        let num_active = self.num_active;
 
-        let mut results = Vec::with_capacity(points.len());
-        for i in 0..points.len() {
-            let mut nearest_active_heap: BinaryHeap<WorstFirst> = BinaryHeap::with_capacity(k + 1);
-            let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
-                Some(BinaryHeap::with_capacity(k_all + 1))
-            } else {
-                None
-            };
-
-            for j in 0..n_obs {
-                let is_active = j < self.num_active;
-                if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
-                    break;
-                }
-                let neighbor_info = NeighborInfo {
-                    index: obs_order[j],
-                    distance: dist[i][j],
-                    is_active,
+        (0..points.len())
+            .into_par_iter()
+            .map(|i| {
+                let mut nearest_active_heap: BinaryHeap<WorstFirst> =
+                    BinaryHeap::with_capacity(k + 1);
+                let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
+                    Some(BinaryHeap::with_capacity(k_all + 1))
+                } else {
+                    None
                 };
-                if let Some(true) = learn {
-                    if let Some(ref mut heap) = nearest_all_heap {
-                        heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
+                let row = &dist[i];
+
+                for j in 0..n_obs {
+                    let is_active = j < num_active;
+                    if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
+                        break;
+                    }
+                    let neighbor_info = NeighborInfo {
+                        index: obs_order[j],
+                        distance: row[j],
+                        is_active,
+                    };
+                    if let Some(true) = learn {
+                        if let Some(ref mut heap) = nearest_all_heap {
+                            heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
+                        }
+                    }
+                    if is_active {
+                        heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
                     }
                 }
-                if is_active {
-                    heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
-                }
-            }
 
-            let nearest_active: Vec<NeighborInfo> =
-                nearest_active_heap.into_iter().map(|w| w.0).collect();
-            let nearest_all = nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
-            results.push((nearest_active, nearest_all));
-        }
-        results
+                let nearest_active: Vec<NeighborInfo> =
+                    nearest_active_heap.into_iter().map(|w| w.0).collect();
+                let nearest_all =
+                    nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
+                (nearest_active, nearest_all)
+            })
+            .collect()
     }
 
     /// Distanz von einem Punkt zu einem Observer (für Wiederverwendung in SDOstream Step 4)

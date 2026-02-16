@@ -3,6 +3,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use ahash::AHashMap;
     use crate::distance_matrix::{DistanceMatrix, DistanceRow};
     use crate::obs::Observer;
     use crate::utils::DistanceMetric;
@@ -78,7 +79,7 @@ mod tests {
     fn distance_matrix_insert_one_observer() {
         let mut m = DistanceMatrix::new(DistanceMetric::Euclidean, None);
         let obs = observer(0, vec![0.0, 0.0]);
-        let map: HashMap<usize, Arc<Observer>> =
+        let map: AHashMap<usize, Arc<Observer>> =
             [(0, Arc::new(obs.clone()))].into_iter().collect();
         m.insert(&obs, &map);
         assert!(!m.is_empty());
@@ -91,7 +92,7 @@ mod tests {
         let mut m = DistanceMatrix::new(DistanceMetric::Euclidean, None);
         let o0 = observer(0, vec![0.0, 0.0]);
         let o1 = observer(1, vec![3.0, 4.0]);
-        let map: HashMap<usize, Arc<Observer>> = [
+        let map: AHashMap<usize, Arc<Observer>> = [
             (0, Arc::new(o0.clone())),
             (1, Arc::new(o1.clone())),
         ]
@@ -109,7 +110,7 @@ mod tests {
         let mut m = DistanceMatrix::new(DistanceMetric::Euclidean, None);
         let o0 = observer(0, vec![0.0, 0.0]);
         let o1 = observer(1, vec![1.0, 0.0]);
-        let map: HashMap<usize, Arc<Observer>> = [
+        let map: AHashMap<usize, Arc<Observer>> = [
             (0, Arc::new(o0.clone())),
             (1, Arc::new(o1.clone())),
         ]
@@ -125,7 +126,7 @@ mod tests {
     #[test]
     fn distance_matrix_rebuild() {
         let mut m = DistanceMatrix::new(DistanceMetric::Euclidean, None);
-        let observers: HashMap<usize, Arc<Observer>> = [
+        let observers: AHashMap<usize, Arc<Observer>> = [
             (0, Arc::new(observer(0, vec![0.0, 0.0]))),
             (1, Arc::new(observer(1, vec![1.0, 0.0]))),
             (2, Arc::new(observer(2, vec![0.0, 1.0]))),

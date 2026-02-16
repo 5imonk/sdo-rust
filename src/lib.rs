@@ -1,4 +1,5 @@
 mod distance_matrix;
+mod distance_simd;
 #[cfg(test)]
 mod distance_matrix_tests;
 #[cfg(all(test, feature = "mahalanobis"))]

@@ -472,6 +472,15 @@ impl SDOstream {
             })
             .collect()
     }
+    
+    /// Public version for benchmarks (always available)
+    pub fn learn_impl_public(
+        &mut self,
+        points: &[Vec<f64>],
+        times: &[f64],
+    ) -> Vec<(f64, Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        self.learn_impl(points, times)
+    }
 
     /// Bestimmt die Anzahl der Ersetzungen basierend auf Poisson-Verteilung.
     pub(crate) fn n_replacements_impl(&self, time: f64) -> usize {
