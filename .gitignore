@@ -47,3 +47,5 @@ frames/
 *.csv
 *.mp4
 *.log
+*.svg
+*.data
