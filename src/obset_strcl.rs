@@ -39,9 +39,10 @@ impl ObserverSet {
     }
 
     /// Aktualisiert Label-Observations mit batch_age und korrektem Fading.
-    /// 1. Fade alle bestehenden label_observation-Werte: v * fading^(batch_end_time - observer.label_time).
-    /// 2. Addiere batch_age (gefadet) zum beobachteten Label: batch_age * fading^(batch_start_time - observer.label_time),
-    ///    oder füge das Label in die HashMap ein falls noch nicht vorhanden.
+    /// 1. Für jedes bestehende Label (außer dem beobachteten): Fade mit observations * fading.powf(batch_end_time - label_entry.time)
+    ///    und speichere als neue observations mit time = batch_end_time
+    /// 2. Für das beobachtete Label: Berechne gefadeten Wert zur batch_start_time, addiere batch_age,
+    ///    speichere als neue observations mit time = batch_end_time
     fn update_label_observations_time(
         &mut self,
         clusters: &Vec<HashSet<usize>>,
@@ -55,35 +56,63 @@ impl ObserverSet {
             return;
         }
 
-        let mut label_updates: Vec<(usize, HashMap<usize, f64>, f64)> = Vec::new();
-
         for (cluster_idx, cluster_set) in clusters.iter().enumerate() {
-            if let Some(&label) = cluster_labels.get(&cluster_idx) {
+            if let Some(&observed_label) = cluster_labels.get(&cluster_idx) {
                 for &obs_idx in cluster_set {
-                    if let Some(observer) = self.get(obs_idx) {
-                        // 1. Fade all existing label_observation values: v * fading^(batch_end_time - label_time)
-                        let time_diff_to_end = batch_end_time - observer.label_time;
-                        let fade_factor = fading.powf(time_diff_to_end);
-                        let mut new_observations: HashMap<usize, f64> = observer
-                            .label_observations
-                            .iter()
-                            .map(|(&l, &v)| (l, v * fade_factor))
-                            .collect();
-
-                        // 2. Add batch_age (faded) to the observed label, or add label to hashmap
-                        let time_diff_start_to_observer = batch_start_time - observer.label_time;
-                        let faded_batch_age = batch_age * fading.powf(time_diff_start_to_observer);
-                        *new_observations.entry(label).or_insert(0.0) += faded_batch_age;
-
-                        label_updates.push((obs_idx, new_observations, batch_end_time));
+                    // Hole rohe label_observations für Updates
+                    if let Some(label_map) = self.get_label_observations_raw(obs_idx) {
+                        // Erstelle neue HashMap für aktualisierte LabelObservationEntry
+                        use crate::obset::LabelObservationEntry;
+                        let mut updated_map: HashMap<usize, LabelObservationEntry> = HashMap::new();
+                        
+                        // 1. Für jedes bestehende Label: Fade zur batch_end_time
+                        for (&label, entry) in label_map.iter() {
+                            if label == observed_label {
+                                // Für das beobachtete Label: Berechne gefadeten Wert zur batch_start_time, addiere batch_age
+                                let time_diff_to_start = batch_start_time - entry.time;
+                                let faded_value = entry.observations * fading.powf(time_diff_to_start);
+                                let new_observations = faded_value + batch_age;
+                                updated_map.insert(label, LabelObservationEntry {
+                                    observations: new_observations,
+                                    time: batch_end_time,
+                                });
+                            } else {
+                                // Für andere Labels: Fade zur batch_end_time
+                                let time_diff_to_end = batch_end_time - entry.time;
+                                let faded_value = entry.observations * fading.powf(time_diff_to_end);
+                                updated_map.insert(label, LabelObservationEntry {
+                                    observations: faded_value,
+                                    time: batch_end_time,
+                                });
+                            }
+                        }
+                        
+                        // Falls das beobachtete Label noch nicht existiert, füge es hinzu
+                        if !updated_map.contains_key(&observed_label) {
+                            // Berechne gefadeten batch_age von batch_start_time
+                            let faded_batch_age = batch_age * fading.powf(batch_start_time - 0.0);
+                            updated_map.insert(observed_label, LabelObservationEntry {
+                                observations: faded_batch_age,
+                                time: batch_end_time,
+                            });
+                        }
+                        
+                        // Aktualisiere mit neuer HashMap
+                        self.update_label_observations(obs_idx, updated_map);
+                    } else {
+                        // Erstelle neue label_observations HashMap
+                        use crate::obset::LabelObservationEntry;
+                        let mut new_map: HashMap<usize, LabelObservationEntry> = HashMap::new();
+                        // Berechne gefadeten batch_age von batch_start_time
+                        let faded_batch_age = batch_age * fading.powf(batch_start_time - 0.0);
+                        new_map.insert(observed_label, LabelObservationEntry {
+                            observations: faded_batch_age,
+                            time: batch_end_time,
+                        });
+                        self.update_label_observations(obs_idx, new_map);
                     }
                 }
             }
-        }
-
-        // Führe alle Updates aus
-        for (index, new_observations, label_time) in label_updates {
-            self.update_label_observations(index, new_observations, label_time);
         }
     }
 }

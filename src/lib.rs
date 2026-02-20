@@ -1,9 +1,3 @@
-mod distance_matrix;
-mod distance_simd;
-#[cfg(test)]
-mod distance_matrix_tests;
-#[cfg(all(test, feature = "mahalanobis"))]
-mod mahalanobis_tests;
 pub mod obs;
 pub mod obset;
 mod obset_clust;
@@ -13,8 +7,7 @@ pub mod sdo_impl;
 pub mod sdoclust_impl;
 pub mod sdostrcl_impl;
 pub mod sdostream_impl;
-#[cfg(feature = "testing")]
-pub mod testing;
+
 pub mod utils;
 
 use pyo3::prelude::*;

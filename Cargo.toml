@@ -20,6 +20,8 @@ rand_distr = "0.4"
 rayon = "1.10"
 pyo3 = { version = "0.21", features = ["auto-initialize", "extension-module"] }
 numpy = "0.21"
+mtree = { git = "https://github.com/5imonk/mtree" }
+statrs = "0.16"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -34,10 +36,11 @@ debug = true
 inherits = "release"
 debug = true
 
-[[bench]]
-name = "optimization_benchmarks"
-harness = false
+# Benchmarks removed - files deleted
+# [[bench]]
+# name = "optimization_benchmarks"
+# harness = false
 
-[[bench]]
-name = "profiling_benchmarks"
-harness = false
+# [[bench]]
+# name = "profiling_benchmarks"
+# harness = false

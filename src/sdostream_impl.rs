@@ -3,10 +3,9 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
-use std::collections::HashMap;
 use std::f64;
 
-use crate::obs::{NeighborInfo, Observer};
+use crate::obs::{neighbor_index, neighbor_distance, NeighborInfo};
 use crate::sdo_impl::SDO;
 use crate::utils::{
     data_to_matrix, sample_random_matrix_uniform_unit, scores_single_or_list_to_py, time_to_f64,
@@ -53,9 +52,10 @@ impl SDOstream {
         data: Option<PyReadonlyArray2<f64>>,
         time: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Self> {
+        let fading_value = Self::get_fading_static(t_fading);
         let mut instance = Self {
-            sdo: SDO::new(k, x, rho, distance, minkowski_p),
-            fading: Self::get_fading_static(t_fading),
+            sdo: SDO::new(k, x, rho, distance, minkowski_p, Some(fading_value), 0.98),
+            fading: fading_value,
             sampling_rate: t_sampling / (k as f64),
             data_points_processed: 0,
             use_explicit_time: time.is_some(), // Default: auto-increment
@@ -207,14 +207,17 @@ impl SDOstream {
         _py: Python,
         index: usize,
     ) -> PyResult<(f64, f64, f64, bool, Option<i32>)> {
-        if let Some(observer) = self.sdo.observers.get(index) {
+        if let Some((_idx, _data, observations, time, age)) = self.sdo.observers.get(index) {
             let is_active = self.sdo.observers.is_active(index);
+            // Berechne Label aus label_observations mit current_time = time des Observers
+            let label = self.sdo.observers.get_label(index, time)
+                .map(|l| l as i32);
             Ok((
-                observer.observations,
-                observer.age,
-                observer.time,
+                observations,
+                age,
+                time,
                 is_active,
-                observer.get_label().map(|l| l as i32),
+                label,
             ))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
@@ -230,16 +233,24 @@ impl SDOstream {
         &self,
         _py: Python,
     ) -> PyResult<Vec<(Vec<f64>, f64, f64, f64, bool, Option<i32>)>> {
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = self.sdo.observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
         let mut result = Vec::new();
-        for observer in self.sdo.observers.iter_observers(false) {
-            let is_active = self.sdo.observers.is_active(observer.index);
+        for (idx, data, observations, time, age) in self.sdo.observers.iter_observers(false) {
+            let is_active = self.sdo.observers.is_active(idx);
+            // Berechne Label aus label_observations mit current_time = max_time
+            let label = self.sdo.observers.get_label(idx, max_time)
+                .map(|l| l as i32);
             result.push((
-                observer.data.clone(),
-                observer.observations,
-                observer.age,
-                observer.time,
+                data.clone(),
+                observations,
+                age,
+                time,
                 is_active,
-                observer.get_label().map(|l| l as i32),
+                label,
             ));
         }
         Ok(result)
@@ -256,9 +267,10 @@ impl SDOstream {
         rho: f64,
         dimension: usize,
     ) -> Self {
+        let fading_value = Self::get_fading_static(t_fading);
         let mut instance = Self {
-            sdo: SDO::new(k, x, rho, "euclidean".to_string(), None),
-            fading: Self::get_fading_static(t_fading),
+            sdo: SDO::new(k, x, rho, "euclidean".to_string(), None, Some(fading_value), 0.98),
+            fading: fading_value,
             sampling_rate: t_sampling / (k as f64),
             data_points_processed: 0,
             use_explicit_time: true,
@@ -301,7 +313,7 @@ impl SDOstream {
             (None, Some(dim)) => sample_random_matrix_uniform_unit(dim, self.k()),
             // Case 3: No data and no dimension → initialize empty
             (None, None) => {
-                self.sdo.observers.set_num_active(0);
+                self.sdo.set_num_active(0);
                 self.last_replacement_time = time;
                 self.pending_replacements = 0;
                 self.data_points_processed = 0;
@@ -310,21 +322,17 @@ impl SDOstream {
         };
 
         for (idx, point_data) in data_points.iter().enumerate() {
-            let observer = crate::obs::Observer {
-                data: point_data.clone(),
-                observations: 1.0, // Start mit 1 observation
-                time: time,
-                age: 1.0,
-                index: idx,
-                local_threshold: 0.0,
-                label_observations: HashMap::new(),
-                label_time: time,
-            };
-            self.sdo.observers.insert(observer);
+            self.sdo.observers.insert(
+                idx,
+                point_data.clone(),
+                1.0, // observations - Start mit 1 observation
+                time,
+                1.0, // age
+            );
         }
 
-        // Setze num_active basierend auf rho
-        self.sdo.observers.set_num_active(
+        // Setze num_active basierend auf rho (this also updates x_safe)
+        self.sdo.set_num_active(
             ((self.sdo.observers.len() as f64) * (1.0 - self.rho())).ceil() as usize,
         );
 
@@ -550,9 +558,12 @@ impl SDOstream {
         let mut candidates: Vec<(usize, f64)> = if let Some(ref mut neighbors) = all_neighbors_opt {
             // Entferne replace_idx falls vorhanden
             if let Some(ridx) = replace_idx {
-                neighbors.retain(|n| n.index != ridx);
+                neighbors.retain(|n| neighbor_index(n) != ridx);
             }
-            neighbors.iter().map(|n| (n.index, n.distance)).collect()
+            neighbors
+                .iter()
+                .map(|n| (neighbor_index(n), neighbor_distance(n)))
+                .collect()
         } else {
             Vec::new()
         };
@@ -570,11 +581,7 @@ impl SDOstream {
         // Erstelle finale all_neighbors_opt mit angepassten Werten (sortiert nach Distanz)
         let final_neighbors: Vec<NeighborInfo> = candidates
             .into_iter()
-            .map(|(idx, dist)| NeighborInfo {
-                index: idx,
-                distance: dist,
-                is_active: self.sdo.observers.is_active(idx),
-            })
+            .map(|(idx, dist)| NeighborInfo::IndexDist(idx, dist))
             .collect();
 
         Some(final_neighbors)
@@ -717,29 +724,24 @@ impl SDOstream {
         self.replacement_count += 1;
         let new_index = self.next_observer_index;
         self.next_observer_index += 1;
-        let new_observer = Observer {
-            data: point.to_vec(),
-            observations: 0.0,
+        
+        let success = self.sdo.observers.replace(
+            replace_idx,
+            new_index,
+            point.to_vec(),
+            0.0, // observations
             time,
-            age: 1.0,
-            index: new_index,
-            local_threshold: 0.0,
-            label_observations: HashMap::new(),
-            label_time: time,
-        };
-        let new_observer_clone = Observer {
-            data: new_observer.data.clone(),
-            observations: new_observer.observations,
-            time: new_observer.time,
-            age: new_observer.age,
-            index: new_observer.index,
-            local_threshold: new_observer.local_threshold,
-            label_observations: new_observer.label_observations.clone(),
-            label_time: new_observer.label_time,
-        };
-        let success = self.sdo.replace_observer(replace_idx, new_observer);
+            1.0, // age
+        );
         if !success {
-            self.sdo.observers.insert(new_observer_clone);
+            // Falls replace fehlschlägt, füge neuen Observer hinzu
+            self.sdo.observers.insert(
+                new_index,
+                point.to_vec(),
+                0.0, // observations
+                time,
+                1.0, // age
+            );
         }
 
         // Aktualisiere Zeit und pending_replacements

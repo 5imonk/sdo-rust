@@ -1,7 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
 
-use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
+use crate::obs::{neighbor_index, NeighborInfo};
 use crate::obset::ObserverSet;
 
 /// Streaming-Erweiterungen für ObserverSet
@@ -23,27 +22,27 @@ impl ObserverSet {
     ) {
         // Sammle Observer-Daten in separatem Scope, um Borrow-Konflikte zu vermeiden
         let updates: Vec<(usize, f64, f64)> = {
-            let nearest_set: HashSet<usize> = nearest_indices.iter().cloned().collect();
+            let nearest_set: std::collections::HashSet<usize> = nearest_indices.iter().cloned().collect();
 
             // Verwende iter_observers für effizienten Zugriff ohne Kopie
             self.iter_observers(false)
-                .map(|observer| {
+                .map(|(index, _data, observations, time, age)| {
                     // Berechne Zeitdifferenz: ti - ti-1
-                    let time_diff = current_time - observer.time;
+                    let time_diff = current_time - time;
                     // Berechne fading-Faktor für diese Zeitdifferenz: f^(ti - ti-1)
                     let fading_factor = fading.powf(time_diff);
 
                     // Update observations: Pω ← f^(ti - ti-1) · Pω + 1 (wenn nearest) bzw. f^(ti - ti-1) · Pω
-                    let new_observations = if nearest_set.contains(&observer.index) {
-                        fading_factor * observer.observations + 1.0
+                    let new_observations = if nearest_set.contains(&index) {
+                        fading_factor * observations + 1.0
                     } else {
-                        fading_factor * observer.observations
+                        fading_factor * observations
                     };
 
                     // Update age: Hω ← f^(ti - ti-1) · Hω + 1
-                    let new_age = fading_factor * observer.age + 1.0;
+                    let new_age = fading_factor * age + 1.0;
 
-                    (observer.index, new_observations, new_age)
+                    (index, new_observations, new_age)
                 })
                 .collect()
         };
@@ -52,88 +51,6 @@ impl ObserverSet {
         for (index, new_observations, new_age) in updates {
             self.update_observer_with_time(index, new_observations, new_age, current_time);
         }
-    }
-
-    /// Update observations, age, and time - O(log n)
-    /// Wichtig für zeitbasierte Updates in SDOstream
-    pub fn update_observer_with_time(
-        &mut self,
-        index: usize,
-        new_observations: f64,
-        new_age: f64,
-        new_time: f64,
-    ) -> bool {
-        // Get the current observer Arc
-        let observer_arc = match self.observers_by_index.get(&index) {
-            Some(arc) => arc.clone(),
-            None => return false,
-        };
-
-        // Remove old entries from secondary indices using old values
-        let old_obs_key = ObservationKey {
-            observations: OrderedFloat(observer_arc.observations),
-            index,
-        };
-        let old_normalized_score = if observer_arc.age > 0.0 {
-            observer_arc.observations / observer_arc.age
-        } else {
-            f64::INFINITY
-        };
-        let old_score_key = NormalizedScoreKey {
-            score: OrderedFloat(old_normalized_score),
-            index,
-        };
-
-        self.indices_by_obs.remove(&old_obs_key);
-        self.indices_by_score.remove(&old_score_key);
-
-        // Update the observer - try to update in place if we have exclusive access
-        let updated_observer = {
-            // Get mutable reference to the Arc in the HashMap
-            let arc_mut = self.observers_by_index.get_mut(&index).unwrap();
-            if let Some(mut_observer) = Arc::get_mut(arc_mut) {
-                // Exclusive access - update in place (no clone!)
-                mut_observer.observations = new_observations;
-                mut_observer.age = new_age;
-                mut_observer.time = new_time;
-                Arc::clone(arc_mut) // Clone the Arc reference, not the Observer
-            } else {
-                // Shared - create new Arc with updated values
-                Arc::new(Observer {
-                    data: observer_arc.data.clone(),
-                    observations: new_observations,
-                    time: new_time,
-                    age: new_age,
-                    index: observer_arc.index,
-                    local_threshold: observer_arc.local_threshold,
-                    label_observations: observer_arc.label_observations.clone(),
-                    label_time: observer_arc.label_time,
-                })
-            }
-        };
-
-        // Update HashMap with new Arc
-        self.observers_by_index.insert(index, updated_observer);
-
-        // Re-insert with updated values
-        let new_obs_key = ObservationKey {
-            observations: OrderedFloat(new_observations),
-            index,
-        };
-        let new_normalized_score = if new_age > 0.0 {
-            new_observations / new_age
-        } else {
-            f64::INFINITY
-        };
-        let new_score_key = NormalizedScoreKey {
-            score: OrderedFloat(new_normalized_score),
-            index,
-        };
-
-        self.indices_by_obs.insert(new_obs_key);
-        self.indices_by_score.insert(new_score_key);
-
-        true
     }
 
     /// Batch-Update von observations mit zeitbasiertem Fading
@@ -195,7 +112,7 @@ impl ObserverSet {
             // Für jede NeighborInfo in dieser Beobachtung: addiere fading_factor zum Beitrag
             for neighbor_info in neighbors {
                 *observer_contributions
-                    .entry(neighbor_info.index)
+                    .entry(neighbor_index(neighbor_info))
                     .or_insert(0.0) += fading_factor;
             }
         }
@@ -203,26 +120,26 @@ impl ObserverSet {
         // Schritt 2: Fade alle Observer und addiere Beiträge
         let updates: Vec<(usize, f64, f64)> = {
             self.iter_observers(false)
-                .map(|observer| {
+                .map(|(index, _data, observations, time, age)| {
                     // Für observations: Fade zur reference_time (max)
-                    let fading_factor_obs = fading.powf(reference_time - observer.time);
+                    let fading_factor_obs = fading.powf(reference_time - time);
 
                     // Hole Beitrag für diesen Observer (0.0 wenn nicht vorhanden)
                     let contribution = observer_contributions
-                        .get(&observer.index)
+                        .get(&index)
                         .copied()
                         .unwrap_or(0.0);
 
                     // Neue observations: gefadete observations + Beiträge (zur reference_time)
-                    let new_observations = fading_factor_obs * observer.observations + contribution;
+                    let new_observations = fading_factor_obs * observations + contribution;
 
                     // Für age: Fade zur reference_start_time (min)
-                    let fading_factor_age = fading.powf(reference_start_time - observer.time);
+                    let fading_factor_age = fading.powf(reference_start_time - time);
 
                     // Neue age: gefadete age + batch_age (beide zur reference_start_time)
-                    let new_age = fading_factor_age * observer.age + batch_age * fading_factor_age;
+                    let new_age = fading_factor_age * age + batch_age * fading_factor_age;
 
-                    (observer.index, new_observations, new_age)
+                    (index, new_observations, new_age)
                 })
                 .collect()
         };

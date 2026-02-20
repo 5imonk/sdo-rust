@@ -2,7 +2,7 @@ use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::obs::NeighborInfo;
+use crate::obs::{neighbor_index, NeighborInfo};
 use crate::sdostream_impl::SDOstream;
 use crate::utils::{data_to_matrix, label_score_results_to_py, times_to_vec_batch};
 
@@ -112,11 +112,15 @@ impl SDOstreamclust {
 
     /// Gibt die Cluster-Labels der aktiven Observer zurück (-1 = kein Label/Outlier).
     pub fn get_observer_labels(&self) -> Vec<i32> {
-        self.sdostream
-            .get_sdo()
-            .observers
+        let observers = &self.sdostream.get_sdo().observers;
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
+        observers
             .iter_observers(true)
-            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
+            .map(|(idx, _, _, _, _)| observers.get_label(idx, max_time).map(|l| l as i32).unwrap_or(-1))
             .collect()
     }
 
@@ -132,27 +136,33 @@ impl SDOstreamclust {
             return Ok((empty.unbind(), vec![], vec![]));
         }
 
+        let observers = &self.sdostream.get_sdo().observers;
         let local_thresholds: Vec<f64> =
-            active_observers.iter().map(|o| o.local_threshold).collect();
-        let global_threshold = local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
+            active_observers.iter().map(|(idx, _, _, _, _)| observers.get_local_threshold(*idx).unwrap_or(f64::INFINITY)).collect();
+        let global_threshold = observers.get_global_threshold();
         let zeta = self.zeta;
         let final_radii: Vec<f64> = local_thresholds
             .iter()
             .map(|h| zeta * h + (1.0 - zeta) * global_threshold)
             .collect();
 
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
         let labels: Vec<i32> = active_observers
             .iter()
-            .map(|o| o.get_label().map(|l| l as i32).unwrap_or(-1))
+            .map(|(idx, _, _, _, _)| observers.get_label(*idx, max_time).map(|l| l as i32).unwrap_or(-1))
             .collect();
 
         let rows = active_observers.len();
-        let cols = active_observers[0].data.len();
+        let cols = active_observers[0].1.len(); // data is second element
         let array = PyArray2::zeros_bound(py, (rows, cols), false);
         unsafe {
             let mut arr = array.as_array_mut();
-            for (i, obs) in active_observers.iter().enumerate() {
-                for (j, &v) in obs.data.iter().enumerate() {
+            for (i, (_idx, data, _obs, _time, _age)) in active_observers.iter().enumerate() {
+                for (j, &v) in data.iter().enumerate() {
                     arr[[i, j]] = v;
                 }
             }
@@ -183,7 +193,7 @@ impl SDOstreamclust {
             self.sdostream
                 .get_sdo()
                 .predict_point(point, Some(true), Some(n_replacements.min(1)));
-        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(neighbor_index).collect();
         let predicted_label = self.compute_label(&nearest_active_indices);
 
         // Schritt 3: Sampling
@@ -270,7 +280,7 @@ impl SDOstreamclust {
         let predicted_labels: Vec<i32> = predict_results
             .iter()
             .map(|(_, active_neighbors, _)| {
-                let indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+                let indices: Vec<usize> = active_neighbors.iter().map(neighbor_index).collect();
                 self.compute_label(&indices)
             })
             .collect();
@@ -348,7 +358,7 @@ impl SDOstreamclust {
     pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
         let point_vec: Vec<f64> = point.to_vec();
         let (median, active_neighbors, _) = self.sdostream.predict_point(&point_vec, learn, None);
-        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+        let nearest_active_indices: Vec<usize> = active_neighbors.iter().map(neighbor_index).collect();
         let predicted_label = self.compute_label(&nearest_active_indices);
         (predicted_label, median)
     }
@@ -359,7 +369,7 @@ impl SDOstreamclust {
         batch
             .into_iter()
             .map(|(median, active_neighbors, _)| {
-                let indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+                let indices: Vec<usize> = active_neighbors.iter().map(neighbor_index).collect();
                 let label = self.compute_label(&indices);
                 (label, median)
             })
@@ -373,12 +383,15 @@ impl SDOstreamclust {
             panic!("No active observers found during prediction!");
         }
 
+        // Bestimme maximale Zeit aller Observer als current_time
+        let observers = &self.sdostream.get_sdo().observers;
+        let max_time = observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+
         // Berechne normalisierte Cluster-Scores der x-nächsten Observer
-        let label_scores = self
-            .sdostream
-            .get_sdo()
-            .observers
-            .get_normalized_cluster_scores(indices);
+        let label_scores = observers
+            .get_normalized_cluster_scores(indices, max_time);
 
         // Finde Label mit maximalem Score (konvertiere zu i32 für Python-API)
         let predicted_label = label_scores

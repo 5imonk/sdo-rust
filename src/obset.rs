@@ -1,97 +1,196 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
 
 use ahash::AHashMap;
 
 use rayon::prelude::*;
 
-use crate::distance_matrix::DistanceMatrix;
-use crate::distance_simd::compute_distances_row_euclidean;
-use crate::obs::{NeighborInfo, NormalizedScoreKey, ObservationKey, Observer, OrderedFloat};
+use mtree::distance::{Distance, EuclideanDistance};
+use mtree::node::ObjectNode;
+use mtree::{MTree, Point};
+use statrs::distribution::{DiscreteCDF, Hypergeometric};
+use std::sync::Arc;
+
+use crate::obs::{NeighborInfo, OrderedFloat};
 use crate::utils::{compute_distance, DistanceMetric};
 
-/// Wrapper for k-nearest heap: max-heap by distance (worst at top), O(log k) push/pop.
-#[derive(Clone)]
-struct WorstFirst(NeighborInfo);
-impl PartialEq for WorstFirst {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.distance == other.0.distance
+/// Custom-Distanz für nicht-euklidische Metriken (Manhattan, Chebyshev, Minkowski).
+/// Wird im MTree und in distance_from_point genutzt, damit überall dieselbe Metrik gilt.
+#[derive(Clone, Copy)]
+struct MetricDistance(DistanceMetric, Option<f64>);
+
+impl Distance<Point> for MetricDistance {
+    type Output = f64;
+
+    fn distance(&self, a: &Point, b: &Point) -> f64 {
+        compute_distance(&a.0, &b.0, self.0, self.1)
+    }
+
+    fn clone_box(&self) -> Box<dyn Distance<Point, Output = f64> + Send + Sync> {
+        Box::new(MetricDistance(self.0, self.1))
     }
 }
-impl Eq for WorstFirst {}
-impl PartialOrd for WorstFirst {
+
+/// Erstellt das MTree mit der konfigurierten Distanz: Euclidean → mtree, sonst MetricDistance.
+fn make_mtree(distance_metric: DistanceMetric, minkowski_p: Option<f64>) -> MTree<Point, usize, f64> {
+    if distance_metric == DistanceMetric::Euclidean {
+        MTree::with_distance(EuclideanDistance)
+    } else {
+        MTree::with_distance(MetricDistance(distance_metric, minkowski_p))
+    }
+}
+
+/// Entry für observations_list: sortiert nach gefadeten observations (descending), dann index
+#[derive(Clone, Debug, Copy)]
+struct ObservationEntry {
+    observations: OrderedFloat,
+    index: usize,
+    time: f64,
+    fading: Option<OrderedFloat>, // Fading-Parameter für gefadete Sortierung
+}
+
+/// Entry für label_observations: speichert unverfadete observations und time pro Label
+#[derive(Clone, Debug)]
+pub struct LabelObservationEntry {
+    /// Unverfadeter Wert
+    pub observations: f64,
+    /// Zeitpunkt der letzten Aktualisierung
+    pub time: f64,
+}
+
+impl PartialEq for ObservationEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
+}
+
+impl Eq for ObservationEntry {}
+
+impl PartialOrd for ObservationEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl Ord for WorstFirst {
+
+impl Ord for ObservationEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0
-            .distance
-            .partial_cmp(&other.0.distance)
-            .unwrap_or(Ordering::Equal)
+        // Verwende fading aus Entry oder 1.0 als Fallback
+        let fading_a = self.fading.map(|f| f.0).unwrap_or(1.0);
+        let fading_b = other.fading.map(|f| f.0).unwrap_or(1.0);
+
+        // Verwende common_touched = max(a.time, b.time) wie in C++ Implementierung
+        let common_touched = self.time.max(other.time);
+
+        // Berechne gefadete Werte: observations * fading.powf(common_touched - time)
+        let faded_a = self.observations.0 * fading_a.powf(common_touched - self.time);
+        let faded_b = other.observations.0 * fading_b.powf(common_touched - other.time);
+
+        // Sortiere nach gefadeten Werten (descending) - reverse comparison
+        let ordering = faded_b.partial_cmp(&faded_a).unwrap_or(Ordering::Equal);
+
+        // Tie-breaker: index (ascending)
+        ordering.then(self.index.cmp(&other.index))
     }
 }
 
-/// Maintains at most k_nearest elements; replaces worst when a closer candidate is found. O(log k) per update.
-fn heap_push_k_nearest(heap: &mut BinaryHeap<WorstFirst>, neighbor: NeighborInfo, k_limit: usize) {
-    if heap.len() < k_limit {
-        heap.push(WorstFirst(neighbor));
-    } else if let Some(worst) = heap.peek() {
-        if neighbor.distance < worst.0.distance {
-            heap.pop();
-            heap.push(WorstFirst(neighbor));
+/// Helper function to convert Vec<f64> to mtree::Point
+fn vec_to_point(data: &[f64]) -> Point {
+    Point::new(data.to_vec())
+}
+
+/// Calculate minimum sample size using hypergeometric distribution
+/// Returns the minimum number of observers to sample to ensure with probability p_required
+/// that at least x_target active observers are included
+pub(crate) fn min_sample_size_hypergeometric(
+    n_pop: u64,      // Total observers (k)
+    k_success: u64,  // Active observers (num_active)
+    x_target: u64,   // Required active neighbors (x)
+    p_required: f64, // Required probability (p_safe)
+) -> Option<u64> {
+    // Edge cases
+    if x_target == 0 {
+        return Some(0);
+    }
+    if k_success < x_target {
+        return None; // Not enough active observers
+    }
+    if n_pop < x_target {
+        return None; // Not enough total observers
+    }
+
+    for n_sample in x_target..=n_pop {
+        let hyper = match Hypergeometric::new(n_pop, k_success, n_sample) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        // P(X < x_target) = cdf(x_target - 1)
+        let x_target_minus_one = if x_target > 0 { x_target - 1 } else { 0 };
+        let prob = hyper.cdf(x_target_minus_one);
+        if 1.0 - prob >= p_required {
+            return Some(n_sample);
         }
     }
+    None
 }
 
-/// Efficient ObserverSet with dual indexing for O(log n) operations
-/// Uses Brute-Force for k-NN operations (Tree support disabled)
-/// Uses Arc<Observer> for shared ownership and direct access without HashMap lookups
-#[derive(Clone)]
+/// Efficient ObserverSet with mtree for spatial search and flat data structures
 pub struct ObserverSet {
-    // Primary storage: O(1) access by index, Arc for shared ownership
-    pub(crate) observers_by_index: AHashMap<usize, Arc<Observer>>,
+    // MTree für räumliche Suche: Key = Point (mtree::Point mit Hash + Eq), Value = global unique index (usize)
+    mtree: MTree<Point, usize, f64>,
 
-    // Secondary index: sorted by observations (descending)
-    // BTreeSet gives us O(log n) for min/max and sorted iteration, no redundant value
-    pub(crate) indices_by_obs: BTreeSet<ObservationKey>,
+    // Point-Lookup: Index -> Point (für mtree Updates und Datenzugriff)
+    // Point enthält Vec<f64> als Tuple-Struct Point(pub Vec<f64>), daher können wir direkt darauf zugreifen
+    point_by_index: AHashMap<usize, Point>,
 
-    // Tertiary index: sorted by normalized score (observations/age, ascending)
-    // O(log n) finding of worst observer
-    pub(crate) indices_by_score: BTreeSet<NormalizedScoreKey>,
+    // Observations-Liste: sortiert nach observations (descending), durchsuchbar nach index
+    observations_list: BTreeSet<ObservationEntry>,
 
-    // Parameters for distance computation
+    // Index-Lookup für observations_list (für O(log n) Updates)
+    index_to_obs_entry: AHashMap<usize, ObservationEntry>,
+
+    // Age-Map: Index -> age
+    age_by_index: AHashMap<usize, f64>,
+
+    // Label observations: Index -> HashMap<label, LabelObservationEntry>
+    label_observations_by_index: AHashMap<usize, HashMap<usize, LabelObservationEntry>>,
+
+    // Local thresholds: Index -> local_threshold
+    local_threshold_by_index: AHashMap<usize, f64>,
+
+    // Globale Parameter
     distance_metric: DistanceMetric,
     minkowski_p: Option<f64>,
-
-    // Number of active observers
+    fading: Option<f64>, // Fading-Parameter f = exp(-T^-1) für gefadete Sortierung
     num_active: usize,
-
-    // Cached index of the last active observer (lowest observations score among active observers)
-    // None if num_active == 0 or there are fewer than num_active observers
+    global_threshold: f64,
+    last_label: usize,
     last_active_observer: Option<usize>,
-
-    // Sparse distance matrix for local threshold / clustering (lazy initialization)
-    pub(crate) distance_matrix: DistanceMatrix,
-    pub(crate) global_threshold: f64,
-    pub(crate) last_label: usize,
 }
 
 impl ObserverSet {
-    pub fn new(distance_metric: DistanceMetric, minkowski_p: Option<f64>) -> Self {
+    pub fn new(
+        distance_metric: DistanceMetric,
+        minkowski_p: Option<f64>,
+        fading: Option<f64>,
+    ) -> Self {
+        // MTree mit konfigurierter Distanz: Euclidean → mtree (inkl. SIMD), sonst MetricDistance
+        let mtree = make_mtree(distance_metric, minkowski_p);
+
         Self {
-            observers_by_index: AHashMap::default(),
-            indices_by_obs: BTreeSet::new(),
-            indices_by_score: BTreeSet::new(),
+            mtree,
+            point_by_index: AHashMap::default(),
+            observations_list: BTreeSet::new(),
+            index_to_obs_entry: AHashMap::default(),
+            age_by_index: AHashMap::default(),
+            label_observations_by_index: AHashMap::default(),
+            local_threshold_by_index: AHashMap::default(),
             distance_metric: distance_metric,
             minkowski_p: minkowski_p,
+            fading: fading,
             num_active: 0,
-            last_active_observer: None,
-            distance_matrix: DistanceMatrix::new(distance_metric, minkowski_p),
             global_threshold: f64::INFINITY,
             last_label: 0,
+            last_active_observer: None,
         }
     }
 
@@ -116,21 +215,12 @@ impl ObserverSet {
         // Finde den Observer an Position num_active - 1 (0-indexiert)
         // Das ist der Observer mit dem niedrigsten observations-Score unter den aktiven
         self.last_active_observer = self
-            .indices_by_obs
+            .observations_list
             .iter()
             .nth(self.num_active - 1)
-            .map(|key| key.index);
+            .map(|entry| entry.index);
     }
 
-    /// Rebuild the full distance matrix (e.g. for initial clustering).
-    pub(crate) fn rebuild_distance_lists(&mut self) {
-        self.distance_matrix.rebuild(&self.observers_by_index);
-    }
-    
-    /// Public version for benchmarks (always available)
-    pub fn rebuild_distance_lists_public(&mut self) {
-        self.rebuild_distance_lists();
-    }
     /// Prüft, ob ein Observer aktiv ist (gehört zu den Top num_active Observern nach observations)
     /// Ein Observer ist aktiv, wenn seine observations >= observations des last_active_observer sind
     /// O(1) - verwendet gecachten last_active_observer
@@ -139,25 +229,25 @@ impl ObserverSet {
             return false; // Keine aktiven Observer definiert
         }
 
-        // Hole den Observer
-        let observer = match self.observers_by_index.get(&index) {
-            Some(arc) => arc.as_ref(),
+        // Hole den Observer-Eintrag
+        let entry = match self.index_to_obs_entry.get(&index) {
+            Some(e) => e,
             None => return false, // Observer existiert nicht
         };
 
         // Verwende gecachten last_active_observer
         match self.last_active_observer {
             Some(last_active_idx) => {
-                // Hole den last_active_observer
-                let last_active_arc = match self.observers_by_index.get(&last_active_idx) {
-                    Some(arc) => arc.as_ref(),
+                // Hole den last_active_observer Eintrag
+                let last_active_entry = match self.index_to_obs_entry.get(&last_active_idx) {
+                    Some(e) => e,
                     None => {
                         // Cache ist veraltet, alle Observer sind aktiv
                         return true;
                     }
                 };
                 // Observer ist aktiv, wenn seine observations >= observations des last_active_observer
-                observer.observations >= last_active_arc.observations
+                entry.observations >= last_active_entry.observations
             }
             None => {
                 // Wenn es weniger als num_active Observer gibt, sind alle aktiv
@@ -167,229 +257,270 @@ impl ObserverSet {
     }
 
     /// Insert a new observer - O(log n)
-    pub fn insert(&mut self, observer: Observer) {
-        let index = observer.index;
-
+    pub fn insert(&mut self, index: usize, data: Vec<f64>, observations: f64, time: f64, age: f64) {
         // Wenn ein Observer mit diesem Index bereits existiert, raise an error
-        if self.observers_by_index.contains_key(&index) {
+        if self.point_by_index.contains_key(&index) {
             panic!("Observer with index {} already exists", index);
         }
 
-        // Create keys for secondary indices (no cloning of observer data)
-        let obs_key = ObservationKey {
-            observations: OrderedFloat(observer.observations),
+        // Konvertiere data zu Point
+        let point = vec_to_point(&data);
+
+        // Füge zu mtree hinzu
+        self.mtree.insert(point.clone(), index);
+
+        // Speichere Point (enthält bereits Vec<f64>)
+        self.point_by_index.insert(index, point);
+
+        // Erstelle ObservationEntry mit fading
+        let obs_entry = ObservationEntry {
+            observations: OrderedFloat(observations),
             index,
-        };
-        let normalized_score = if observer.age > 0.0 {
-            observer.observations / observer.age
-        } else {
-            f64::INFINITY
-        };
-        let score_key = NormalizedScoreKey {
-            score: OrderedFloat(normalized_score),
-            index,
+            time,
+            fading: self.fading.map(OrderedFloat),
         };
 
-        // Insert into all structures with Arc for shared ownership
-        let observer_arc = Arc::new(observer);
-        self.observers_by_index.insert(index, observer_arc);
-        self.indices_by_obs.insert(obs_key);
-        self.indices_by_score.insert(score_key);
+        // Füge zu observations_list hinzu
+        self.observations_list.insert(obs_entry);
+        self.index_to_obs_entry.insert(index, obs_entry);
 
-        // Update last_active_observer cache, da sich die Observer-Liste geändert hat
+        // Füge zu age_by_index hinzu
+        self.age_by_index.insert(index, age);
+
+        // Initialisiere label_observations, local_threshold
+        self.label_observations_by_index
+            .insert(index, HashMap::new());
+        self.local_threshold_by_index.insert(index, f64::INFINITY);
+
+        // Update last_active_observer cache
         self.update_last_active_observer();
-
-        // Update distance lists für alle Observer
-        let new_observer = self
-            .observers_by_index
-            .get(&index)
-            .map(Arc::as_ref)
-            .expect("just inserted");
-        self.distance_matrix
-            .insert(new_observer, &self.observers_by_index);
     }
 
-    /// Get observer by index - O(1)
-    pub fn get(&self, index: usize) -> Option<&Observer> {
-        self.observers_by_index.get(&index).map(|arc| arc.as_ref())
+    /// Get data by index - O(1)
+    /// Returns reference to Vec<f64> from Point
+    pub fn get_data(&self, index: usize) -> Option<&Vec<f64>> {
+        self.point_by_index.get(&index).map(|p| &p.0)
+    }
+
+    /// Get observations by index - O(1)
+    pub fn get_observations(&self, index: usize) -> Option<f64> {
+        self.index_to_obs_entry
+            .get(&index)
+            .map(|e| e.observations.0)
+    }
+
+    /// Get age by index - O(1)
+    pub fn get_age(&self, index: usize) -> Option<f64> {
+        self.age_by_index.get(&index).copied()
+    }
+
+    /// Get label observations by index with fading applied - O(n) where n is number of labels
+    /// Returns HashMap with faded values: observations * fading.powf(current_time - time)
+    pub fn get_label_observations(
+        &self,
+        index: usize,
+        current_time: f64,
+    ) -> Option<HashMap<usize, f64>> {
+        let raw = self.label_observations_by_index.get(&index)?;
+        let fading = self.fading.unwrap_or(1.0); // Wenn kein fading, verwende 1.0 (kein Fading)
+
+        Some(
+            raw.iter()
+                .map(|(&label, entry)| {
+                    let time_diff = current_time - entry.time;
+                    let faded_value = entry.observations * fading.powf(time_diff);
+                    (label, faded_value)
+                })
+                .collect(),
+        )
+    }
+
+    /// Get raw label observations by index (for updates) - O(1)
+    /// Returns HashMap with LabelObservationEntry (unfaded observations and time)
+    pub fn get_label_observations_raw(
+        &self,
+        index: usize,
+    ) -> Option<&HashMap<usize, LabelObservationEntry>> {
+        self.label_observations_by_index.get(&index)
+    }
+
+    /// Get local threshold by index - O(1)
+    pub fn get_local_threshold(&self, index: usize) -> Option<f64> {
+        self.local_threshold_by_index.get(&index).copied()
+    }
+
+    /// Get time by index - O(1)
+    pub fn get_time(&self, index: usize) -> Option<f64> {
+        self.index_to_obs_entry.get(&index).map(|e| e.time)
     }
 
     /// Update observer's observations and age - O(log n)
     pub fn update_observer(&mut self, index: usize, new_observations: f64, new_age: f64) -> bool {
-        // Get the current observer Arc
-        let observer_arc = match self.observers_by_index.get(&index) {
-            Some(arc) => arc.clone(),
+        // Hole alte ObservationEntry
+        let old_entry = match self.index_to_obs_entry.get(&index).copied() {
+            Some(e) => e,
             None => return false,
         };
 
-        // Remove old entries from secondary indices using old values
-        let old_obs_key = ObservationKey {
-            observations: crate::obs::OrderedFloat(observer_arc.observations),
+        // Entferne alte Entry aus observations_list
+        self.observations_list.remove(&old_entry);
+
+        // Hole alte time und fading
+        let time = old_entry.time;
+        let fading = old_entry.fading;
+
+        // Erstelle neue ObservationEntry mit aktualisiertem fading (falls vorhanden)
+        let new_entry = ObservationEntry {
+            observations: OrderedFloat(new_observations),
             index,
-        };
-        let old_normalized_score = if observer_arc.age > 0.0 {
-            observer_arc.observations / observer_arc.age
-        } else {
-            f64::INFINITY
-        };
-        let old_score_key = NormalizedScoreKey {
-            score: crate::obs::OrderedFloat(old_normalized_score),
-            index,
+            time,
+            fading: fading.or(self.fading.map(OrderedFloat)),
         };
 
-        self.indices_by_obs.remove(&old_obs_key);
-        self.indices_by_score.remove(&old_score_key);
+        // Füge neue Entry zu observations_list hinzu
+        self.observations_list.insert(new_entry);
+        self.index_to_obs_entry.insert(index, new_entry);
 
-        // Update the observer - try to update in place if we have exclusive access
-        let updated_observer = {
-            // Get mutable reference to the Arc in the HashMap
-            let arc_mut = self.observers_by_index.get_mut(&index).unwrap();
-            if let Some(mut_observer) = Arc::get_mut(arc_mut) {
-                // Exclusive access - update in place (no clone!)
-                mut_observer.observations = new_observations;
-                mut_observer.age = new_age;
-                Arc::clone(arc_mut) // Clone the Arc reference, not the Observer
-            } else {
-                // Shared - create new Arc with updated values
-                Arc::new(Observer {
-                    data: observer_arc.data.clone(),
-                    observations: new_observations,
-                    time: observer_arc.time,
-                    age: new_age,
-                    index: observer_arc.index,
-                    local_threshold: observer_arc.local_threshold,
-                    label_observations: observer_arc.label_observations.clone(),
-                    label_time: observer_arc.label_time,
-                })
-            }
-        };
+        // Aktualisiere age_by_index
+        self.age_by_index.insert(index, new_age);
 
-        // Update HashMap with new Arc
-        self.observers_by_index.insert(index, updated_observer);
-
-        // Re-insert with updated values
-        let new_obs_key = ObservationKey {
-            observations: crate::obs::OrderedFloat(new_observations),
-            index,
-        };
-        let new_normalized_score = if new_age > 0.0 {
-            new_observations / new_age
-        } else {
-            f64::INFINITY
-        };
-        let new_score_key = NormalizedScoreKey {
-            score: crate::obs::OrderedFloat(new_normalized_score),
-            index,
-        };
-
-        self.indices_by_obs.insert(new_obs_key);
-        self.indices_by_score.insert(new_score_key);
-
-        // Update last_active_observer cache, da sich observations geändert haben
+        // Update last_active_observer cache
         self.update_last_active_observer();
 
         true
     }
 
-    /// Get top N observers by observations - O(N)
-    /// Clones observers - use get_active_arcs() for better performance
-    pub fn get_observers(&self, active: bool) -> Vec<Observer> {
-        self.indices_by_obs
-            .iter()
-            .take(if active {
-                self.num_active
-            } else {
-                self.observers_by_index.len()
-            })
-            .filter_map(|key| {
-                self.observers_by_index
-                    .get(&key.index)
-                    .map(|arc| (**arc).clone())
-            })
-            .collect()
-    }
+    /// Update observer's observations, age, and time - O(log n)
+    pub fn update_observer_with_time(
+        &mut self,
+        index: usize,
+        new_observations: f64,
+        new_age: f64,
+        new_time: f64,
+    ) -> bool {
+        // Hole alte ObservationEntry
+        let old_entry = match self.index_to_obs_entry.get(&index).copied() {
+            Some(e) => e,
+            None => return false,
+        };
 
-    /// Get iterator over active observers (top N by observations) - O(1) to create, O(N) to iterate
-    /// More efficient than get_active when you only need to iterate without cloning
-    pub fn iter_observers(&self, active: bool) -> impl Iterator<Item = &Observer> {
-        // Collect indices first, then map to Arc dereferences
-        let indices: Vec<usize> = self
-            .indices_by_obs
-            .iter()
-            .take(if active {
-                self.num_active
-            } else {
-                self.observers_by_index.len()
-            })
-            .map(|key| key.index)
-            .collect();
-        indices
-            .into_iter()
-            .filter_map(move |index| self.observers_by_index.get(&index).map(|arc| arc.as_ref()))
-    }
+        // Entferne alte Entry aus observations_list
+        self.observations_list.remove(&old_entry);
 
-    /// Remove an observer by index - O(log n)
-    pub fn remove(&mut self, index: usize) -> Option<Observer> {
-        // Wenn ein Observer mit diesem Index nicht existiert, raise an error
-        if !self.observers_by_index.contains_key(&index) {
-            panic!("Observer with index {} does not exist", index);
-        }
+        // Hole fading aus alter Entry oder verwende self.fading
+        let fading = old_entry.fading.or(self.fading.map(OrderedFloat));
 
-        // Entferne ALLE Einträge mit diesem index aus sekundären Indizes
-        // (nicht nur den mit aktuellen observations, da sich diese geändert haben könnten)
-        let keys_to_remove_obs: Vec<ObservationKey> = self
-            .indices_by_obs
-            .iter()
-            .filter(|key| key.index == index)
-            .cloned()
-            .collect();
-        for key in keys_to_remove_obs {
-            self.indices_by_obs.remove(&key);
-        }
+        // Erstelle neue ObservationEntry mit aktualisiertem fading
+        let new_entry = ObservationEntry {
+            observations: OrderedFloat(new_observations),
+            index,
+            time: new_time,
+            fading,
+        };
 
-        let keys_to_remove_score: Vec<NormalizedScoreKey> = self
-            .indices_by_score
-            .iter()
-            .filter(|key| key.index == index)
-            .cloned()
-            .collect();
-        for key in keys_to_remove_score {
-            self.indices_by_score.remove(&key);
-        }
+        // Füge neue Entry zu observations_list hinzu
+        self.observations_list.insert(new_entry);
+        self.index_to_obs_entry.insert(index, new_entry);
 
-        // Remove from primary structure
-        let observer_arc = self.observers_by_index.remove(&index)?;
+        // Aktualisiere age_by_index
+        self.age_by_index.insert(index, new_age);
 
-        // Update last_active_observer cache, da sich die Observer-Liste geändert hat
+        // Update last_active_observer cache
         self.update_last_active_observer();
 
-        // Update distance lists: Entferne diesen Observer aus allen Distanzlisten
-        self.distance_matrix.remove(index);
+        true
+    }
 
-        // Return owned Observer (dereference Arc)
-        Some((*observer_arc).clone())
+    /// Update observer data - O(n) wegen mtree Rebuild
+    /// Note: mtree doesn't have remove, so we rebuild the tree
+    /// For better performance, consider keeping track of updates and rebuilding periodically
+    pub fn update_data(&mut self, index: usize, new_data: Vec<f64>) -> bool {
+        if !self.point_by_index.contains_key(&index) {
+            return false;
+        }
+
+        // Konvertiere neue Daten zu Point
+        let new_point = vec_to_point(&new_data);
+
+        // Aktualisiere point_by_index
+        self.point_by_index.insert(index, new_point);
+
+        // Rebuild mtree - sammle alle Einträge und baue neu auf (gleiche Distanz wie bei new)
+        let mut new_mtree = make_mtree(self.distance_metric, self.minkowski_p);
+        for (&idx, point) in &self.point_by_index {
+            new_mtree.insert(point.clone(), idx);
+        }
+        self.mtree = new_mtree;
+
+        true
+    }
+
+    /// Remove an observer by index - O(n) wegen mtree Rebuild
+    /// Note: mtree doesn't have remove, so we rebuild the tree
+    pub fn remove(&mut self, index: usize) -> Option<Vec<f64>> {
+        // Wenn ein Observer mit diesem Index nicht existiert, return None
+        if !self.point_by_index.contains_key(&index) {
+            return None;
+        }
+
+        // Entferne aus point_by_index und extrahiere Vec<f64>
+        let point = self.point_by_index.remove(&index)?;
+        let data = point.0; // Extrahiere Vec<f64> aus Point
+
+        // Entferne aus observations_list
+        if let Some(entry) = self.index_to_obs_entry.get(&index).copied() {
+            self.observations_list.remove(&entry);
+            self.index_to_obs_entry.remove(&index);
+        }
+
+        // Entferne aus age_by_index
+        self.age_by_index.remove(&index);
+
+        // Entferne aus label_observations_by_index, local_threshold_by_index
+        self.label_observations_by_index.remove(&index);
+        self.local_threshold_by_index.remove(&index);
+
+        // Rebuild mtree ohne diesen Eintrag (gleiche Distanz wie bei new)
+        let mut new_mtree = make_mtree(self.distance_metric, self.minkowski_p);
+        for (&idx, point) in &self.point_by_index {
+            new_mtree.insert(point.clone(), idx);
+        }
+        self.mtree = new_mtree;
+
+        // Update last_active_observer cache
+        self.update_last_active_observer();
+
+        Some(data)
     }
 
     /// Replace an observer - O(log n)
-    pub fn replace(&mut self, old_index: usize, new_observer: Observer) -> bool {
+    pub fn replace(
+        &mut self,
+        old_index: usize,
+        new_index: usize,
+        new_data: Vec<f64>,
+        new_observations: f64,
+        new_time: f64,
+        new_age: f64,
+    ) -> bool {
         // Remove old observer
         if self.remove(old_index).is_none() {
             return false;
         }
 
         // Insert new observer
-        self.insert(new_observer);
+        self.insert(new_index, new_data, new_observations, new_time, new_age);
         true
     }
 
     /// Get number of observers - O(1)
     pub fn len(&self) -> usize {
-        self.observers_by_index.len()
+        self.point_by_index.len()
     }
 
     /// Check if empty - O(1)
     pub fn is_empty(&self) -> bool {
-        self.observers_by_index.is_empty()
+        self.point_by_index.is_empty()
     }
 
     /// Get number of active observers - O(1)
@@ -397,497 +528,332 @@ impl ObserverSet {
         self.num_active
     }
 
-    /// Get iterator over all observers (unsorted)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn iter(&self) -> impl Iterator<Item = &Observer> {
-        self.observers_by_index.values().map(|arc| arc.as_ref())
+    /// Get iterator over observers (sorted by observations)
+    pub fn iter_observers(
+        &self,
+        active: bool,
+    ) -> impl Iterator<Item = (usize, &Vec<f64>, f64, f64, f64)> {
+        let limit = if active {
+            self.num_active
+        } else {
+            self.observations_list.len()
+        };
+
+        self.observations_list
+            .iter()
+            .take(limit)
+            .filter_map(move |entry| {
+                let point = self.point_by_index.get(&entry.index)?;
+                let age = self.age_by_index.get(&entry.index)?;
+                Some((
+                    entry.index,
+                    &point.0,
+                    entry.observations.0,
+                    entry.time,
+                    *age,
+                ))
+            })
     }
 
     /// Find the worst observer by normalized score - O(1)
     /// By default k = 1
     pub fn find_k_worst(&self, k: Option<usize>) -> Vec<usize> {
-        if let Some(k) = k {
-            if k < 1 {
+        if let Some(k_val) = k {
+            if k_val < 1 {
                 panic!("k must be greater than 0");
             }
         }
-        self.indices_by_score
+
+        // Lazy calculation: normalized score = observations / age
+        let mut scores: Vec<(f64, usize)> = self
+            .observations_list
+            .iter()
+            .filter_map(|entry| {
+                let age = self.age_by_index.get(&entry.index)?;
+                let score = if *age > 0.0 {
+                    entry.observations.0 / *age
+                } else {
+                    f64::INFINITY
+                };
+                Some((score, entry.index))
+            })
+            .collect();
+
+        scores.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+        scores
             .iter()
             .take(k.unwrap_or(1))
-            .map(|key| key.index)
+            .map(|(_, idx)| *idx)
             .collect()
-    }
-
-    /// Update only observations - O(log n)
-    pub fn update_observations(&mut self, index: usize, new_observations: f64) -> bool {
-        if let Some(observer) = self.observers_by_index.get(&index) {
-            let current_age = observer.age;
-            self.update_observer(index, new_observations, current_age)
-        } else {
-            false
-        }
     }
 
     /// Update observer label observations HashMap - O(1)
     pub fn update_label_observations(
         &mut self,
         index: usize,
-        label_observations: HashMap<usize, f64>,
-        label_time: f64,
+        label_observations: HashMap<usize, LabelObservationEntry>,
     ) -> bool {
-        if let Some(arc) = self.observers_by_index.get_mut(&index) {
-            if let Some(mut_observer) = Arc::get_mut(arc) {
-                // Exclusive access - update in place (no clone!)
-                mut_observer.label_observations = label_observations;
-                mut_observer.label_time = label_time;
-                true
-            } else {
-                // Shared - create new Arc with updated label_observations
-                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
-                let updated_observer = Arc::new(Observer {
-                    data: observer_arc.data.clone(),
-                    observations: observer_arc.observations,
-                    time: observer_arc.time,
-                    age: observer_arc.age,
-                    index: observer_arc.index,
-                    local_threshold: observer_arc.local_threshold,
-                    label_observations,
-                    label_time,
-                });
-                self.observers_by_index.insert(index, updated_observer);
-                true
-            }
-        } else {
-            false
+        if !self.point_by_index.contains_key(&index) {
+            return false;
         }
+        self.label_observations_by_index
+            .insert(index, label_observations);
+        true
+    }
+
+    /// Update single label observation for an observer - O(1)
+    pub fn update_label_observation(
+        &mut self,
+        index: usize,
+        label: usize,
+        observations: f64,
+        time: f64,
+    ) -> bool {
+        if !self.point_by_index.contains_key(&index) {
+            return false;
+        }
+
+        let label_map = self
+            .label_observations_by_index
+            .entry(index)
+            .or_insert_with(HashMap::new);
+
+        label_map.insert(label, LabelObservationEntry { observations, time });
+        true
     }
 
     /// Update observer local threshold - O(1)
     pub fn update_local_threshold(&mut self, index: usize, local_threshold: f64) -> bool {
-        if let Some(arc) = self.observers_by_index.get_mut(&index) {
-            if let Some(mut_observer) = Arc::get_mut(arc) {
-                // Exclusive access - update in place (no clone!)
-                mut_observer.local_threshold = local_threshold;
-                true
-            } else {
-                // Shared - create new Arc with updated local_threshold
-                let observer_arc = self.observers_by_index.get(&index).unwrap().clone();
-                let updated_observer = Arc::new(Observer {
-                    data: observer_arc.data.clone(),
-                    observations: observer_arc.observations,
-                    time: observer_arc.time,
-                    age: observer_arc.age,
-                    index: observer_arc.index,
-                    local_threshold,
-                    label_observations: observer_arc.label_observations.clone(),
-                    label_time: observer_arc.label_time,
-                });
-                self.observers_by_index.insert(index, updated_observer);
-                true
-            }
-        } else {
-            false
+        if !self.point_by_index.contains_key(&index) {
+            return false;
         }
+        self.local_threshold_by_index.insert(index, local_threshold);
+        true
     }
 
-    /// Returns (active_neighbors, all_neighbors) where:
-    /// - active_neighbors: k-nearest active neighbors only
-    /// - all_neighbors: k-nearest neighbors regardless of active status, only if learn is set and true, otherwise None
-    /// Uses heaps for O(k log k) per point instead of O(k²).
-    pub fn search_neighbors_unified(
+    /// k-NN search using x_safe sampling strategy
+    /// Returns x_safe nearest observers (sorted by distance ascending)
+    /// Uses mtree structure directly for efficiency
+    pub fn knn_search(
         &self,
         query_point: &[f64],
-        k: usize,
-        learn: Option<bool>,
-        k_learn: Option<usize>,
-    ) -> (Vec<NeighborInfo>, Option<Vec<NeighborInfo>>) {
-        let k_all = k_learn.unwrap_or(0) + k;
-        let mut nearest_active_heap: BinaryHeap<WorstFirst> = BinaryHeap::with_capacity(k + 1);
-        let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
-            Some(BinaryHeap::with_capacity(k_all + 1))
-        } else {
-            None
-        };
+        x: usize,
+    ) -> Vec<(Arc<ObjectNode<Point, usize>>, f64)> {
+        let query_point_conv = vec_to_point(query_point);
 
-        for (position, obs_key) in self.indices_by_obs.iter().enumerate() {
-            let observer = match self.observers_by_index.get(&obs_key.index) {
-                Some(obs) => obs,
-                None => continue,
-            };
-            let is_active = position < self.num_active;
-            if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
-                break;
-            }
-
-            let distance = compute_distance(
-                &observer.data,
-                query_point,
-                self.distance_metric,
-                self.minkowski_p,
-            );
-            let neighbor_info = NeighborInfo {
-                index: obs_key.index,
-                distance,
-                is_active,
-            };
-
-            if let Some(true) = learn {
-                if let Some(ref mut heap) = nearest_all_heap {
-                    heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
-                }
-            }
-            if is_active {
-                heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
-            }
-        }
-
-        let nearest_active: Vec<NeighborInfo> = nearest_active_heap
-            .into_iter()
-            .map(|w| w.0)
-            .collect();
-        let nearest_all = nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
-        (nearest_active, nearest_all)
+        // Use mtree knn_search - returns Vec<(Arc<ObjectNode<Point, usize>>, f64)> sorted by distance (ascending)
+        self.mtree.knn_search(&query_point_conv, x)
     }
 
-    /// Distanzmatrix: Zeilen = Punkte, Spalten = Observer in indices_by_obs-Reihenfolge.
-    /// dist[i][j] = Abstand von points[i] zum Observer an Position j.
-    /// Baut einmal ordered_data (kein HashMap im Hot Path). Euclidean nutzt SIMD.
-    fn compute_distance_matrix(&self, points: &[Vec<f64>]) -> Vec<Vec<f64>> {
-        let ordered_data: Vec<&[f64]> = self
-            .indices_by_obs
-            .iter()
-            .filter_map(|k| {
-                self.observers_by_index
-                    .get(&k.index)
-                    .map(|o| o.data.as_slice())
-            })
-            .collect();
-        let observers_slice: &[&[f64]] = &ordered_data[..];
-        let metric = self.distance_metric;
-        let p = self.minkowski_p;
-
-        if metric == DistanceMetric::Euclidean {
-            points
-                .par_iter()
-                .map(|point| compute_distances_row_euclidean(point, observers_slice))
-                .collect()
-        } else {
-            points
-                .par_iter()
-                .map(|point| {
-                    ordered_data
-                        .iter()
-                        .map(|obs_data| compute_distance(obs_data, point, metric, p))
-                        .collect::<Vec<f64>>()
+    /// Extract x neighbors from candidates (mtree knn_search result).
+    /// Returns Vec<NeighborInfo> for the x closest neighbors (MTree variant).
+    /// If active_only is true, only returns active observers; otherwise returns all observers.
+    pub fn extract_x_neighbors(
+        &self,
+        candidates: &[(Arc<ObjectNode<Point, usize>>, f64)],
+        x: usize,
+        active_only: bool,
+    ) -> Vec<NeighborInfo> {
+        if active_only {
+            candidates
+                .iter()
+                .filter_map(|(node, dist)| {
+                    let idx = node.value.1;
+                    if self.is_active(idx) {
+                        Some(NeighborInfo::MTree(Arc::clone(node), *dist))
+                    } else {
+                        None
+                    }
                 })
+                .take(x)
+                .collect()
+        } else {
+            candidates
+                .iter()
+                .take(x)
+                .map(|(node, dist)| NeighborInfo::MTree(Arc::clone(node), *dist))
                 .collect()
         }
     }
 
-    /// Batch-Version von search_neighbors_unified: k-NN für mehrere Punkte in einem Aufruf.
-    /// Nutzt eine gemeinsame Distanzmatrix (parallel + ggf. SIMD) und Heap-basierte k-NN pro Punkt (parallel).
-    pub fn search_neighbors_unified_batch(
+    /// Batch-Version von knn_search: k-NN für mehrere Punkte in einem Aufruf.
+    /// Nutzt parallele mtree knn_search für jeden Punkt.
+    /// Returns Vec<Vec<(Arc<ObjectNode<Point, usize>>, f64)>> - mtree structures directly
+    pub fn knn_search_batch(
         &self,
         points: &[Vec<f64>],
-        k: usize,
-        learn: Option<bool>,
-        k_learn: Option<usize>,
-    ) -> Vec<(Vec<NeighborInfo>, Option<Vec<NeighborInfo>>)> {
+        x: usize,
+    ) -> Vec<Vec<(Arc<ObjectNode<Point, usize>>, f64)>> {
         if points.is_empty() {
             return Vec::new();
         }
-        let obs_order: Vec<usize> = self.indices_by_obs.iter().map(|key| key.index).collect();
-        let n_obs = obs_order.len();
-        let dist = self.compute_distance_matrix(points);
-        let k_all = k_learn.unwrap_or(0) + k;
-        let num_active = self.num_active;
 
-        (0..points.len())
-            .into_par_iter()
-            .map(|i| {
-                let mut nearest_active_heap: BinaryHeap<WorstFirst> =
-                    BinaryHeap::with_capacity(k + 1);
-                let mut nearest_all_heap: Option<BinaryHeap<WorstFirst>> = if learn == Some(true) {
-                    Some(BinaryHeap::with_capacity(k_all + 1))
-                } else {
-                    None
-                };
-                let row = &dist[i];
-
-                for j in 0..n_obs {
-                    let is_active = j < num_active;
-                    if ((learn.is_some() && !learn.unwrap()) || learn.is_none()) && !is_active {
-                        break;
-                    }
-                    let neighbor_info = NeighborInfo {
-                        index: obs_order[j],
-                        distance: row[j],
-                        is_active,
-                    };
-                    if let Some(true) = learn {
-                        if let Some(ref mut heap) = nearest_all_heap {
-                            heap_push_k_nearest(heap, neighbor_info.clone(), k_all);
-                        }
-                    }
-                    if is_active {
-                        heap_push_k_nearest(&mut nearest_active_heap, neighbor_info, k);
-                    }
-                }
-
-                let nearest_active: Vec<NeighborInfo> =
-                    nearest_active_heap.into_iter().map(|w| w.0).collect();
-                let nearest_all =
-                    nearest_all_heap.map(|h| h.into_iter().map(|w| w.0).collect());
-                (nearest_active, nearest_all)
+        points
+            .par_iter()
+            .map(|point| {
+                let query_point_conv = vec_to_point(point);
+                // Use mtree knn_search - returns Vec<(Arc<ObjectNode>, f64)> sorted by distance (ascending)
+                self.mtree.knn_search(&query_point_conv, x)
             })
             .collect()
     }
 
-    /// Distanz von einem Punkt zu einem Observer (für Wiederverwendung in SDOstream Step 4)
+    /// Distanz von einem Punkt zu einem Observer (für Wiederverwendung in SDOstream Step 4).
+    /// Bei Euclidean wird die mtree-Distanz (inkl. SIMD) verwendet, sonst compute_distance.
     pub(crate) fn distance_from_point(&self, point: &[f64], observer_index: usize) -> Option<f64> {
-        let observer = self.observers_by_index.get(&observer_index)?;
-        Some(compute_distance(
-            &observer.data,
-            point,
-            self.distance_metric,
-            self.minkowski_p,
-        ))
-    }
-
-    /// Finde k nächste Nachbarn für einen Observer unter Verwendung der Distanzliste
-    /// O(k) da Distanzliste bereits sortiert ist
-    pub fn get_k_nearest_neighbors(&self, observer_index: usize, k: usize) -> Vec<(usize, f64)> {
-        if let Some(distance_list) = self.distance_matrix.get(observer_index) {
-            let end = k.min(distance_list.distances.len());
-            distance_list.distances[..end].to_vec()
+        let observer_point = self.point_by_index.get(&observer_index)?;
+        let d = if self.distance_metric == DistanceMetric::Euclidean {
+            EuclideanDistance::distance_slice(point, &observer_point.0)
         } else {
-            Vec::new()
-        }
+            compute_distance(&observer_point.0, point, self.distance_metric, self.minkowski_p)
+        };
+        Some(d)
     }
 
-    /// Finde alle Nachbarn innerhalb eines Thresholds unter Verwendung der Distanzliste
+    /// Finde k nächste Nachbarn für einen Observer unter Verwendung von mtree
+    /// O(k log n) mit mtree
+    pub fn get_k_nearest_neighbors(&self, observer_index: usize, k: usize) -> Vec<(usize, f64)> {
+        let point = match self.point_by_index.get(&observer_index) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let results = self.mtree.knn_search(point, k);
+        results
+            .into_iter()
+            .map(|(node, dist)| (node.value.1, dist))
+            .collect()
+    }
+
+    /// Finde alle Nachbarn innerhalb eines Thresholds unter Verwendung von mtree
     /// O(log n + m) wobei m die Anzahl der Nachbarn innerhalb des Thresholds ist
     pub fn get_neighbors_within_threshold(
         &self,
         observer_index: usize,
         threshold: f64,
     ) -> Vec<(usize, f64)> {
-        if let Some(distance_list) = self.distance_matrix.get(observer_index) {
-            let end_pos = distance_list.find_threshold_position(threshold);
-            distance_list.distances[..end_pos].to_vec()
+        let point = match self.point_by_index.get(&observer_index) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let range_query = self.mtree.range_search(point, threshold);
+        range_query
+            .into_iter()
+            .map(|(node, dist)| (node.value.1, dist))
+            .collect()
+    }
+
+    /// Get observer by index - O(1) - compatibility method
+    /// Returns data, observations, time, age tuple
+    pub fn get(&self, index: usize) -> Option<(usize, &Vec<f64>, f64, f64, f64)> {
+        let point = self.point_by_index.get(&index)?;
+        let observations = self.get_observations(index)?;
+        let time = self.get_time(index)?;
+        let age = self.get_age(index)?;
+        Some((index, &point.0, observations, time, age))
+    }
+
+    /// Get all observers (for compatibility)
+    pub fn get_observers(&self, active: bool) -> Vec<(usize, Vec<f64>, f64, f64, f64)> {
+        self.iter_observers(active)
+            .map(|(idx, data, obs, time, age)| (idx, data.clone(), obs, time, age))
+            .collect()
+    }
+
+    /// Update observations only - O(log n)
+    pub fn update_observations(&mut self, index: usize, new_observations: f64) -> bool {
+        if let Some(age) = self.get_age(index) {
+            self.update_observer(index, new_observations, age)
         } else {
-            Vec::new()
+            false
         }
     }
 
-    /// Batch-Update für Distanzlisten wenn mehrere Observer gleichzeitig aktualisiert werden
-    /// Vermeidet wiederholte Neuberechnungen
-    pub fn batch_update_distance_lists(&mut self, updated_indices: &[usize]) {
-        if updated_indices.is_empty() {
-            return;
-        }
+    /// Get global threshold
+    pub fn get_global_threshold(&self) -> f64 {
+        self.global_threshold
+    }
 
-        // Sammle aktuelle Daten für alle aktualisierten Observer
-        let updated_data: HashMap<usize, Vec<f64>> = updated_indices
-            .iter()
-            .filter_map(|&idx| {
-                self.observers_by_index
-                    .get(&idx)
-                    .map(|arc| (idx, arc.data.clone()))
+    /// Set global threshold
+    pub fn set_global_threshold(&mut self, threshold: f64) {
+        self.global_threshold = threshold;
+    }
+
+    /// Get global threshold (public field access)
+    pub fn global_threshold(&self) -> f64 {
+        self.global_threshold
+    }
+
+    /// Get last label
+    pub fn get_last_label(&self) -> usize {
+        self.last_label
+    }
+
+    /// Set last label
+    pub fn set_last_label(&mut self, label: usize) {
+        self.last_label = label;
+    }
+
+    /// Get last label (public field access)
+    pub fn last_label(&self) -> usize {
+        self.last_label
+    }
+
+    /// Get fading parameter
+    pub(crate) fn get_fading(&self) -> Option<f64> {
+        self.fading
+    }
+
+    /// Rebuild distance lists - no-op for mtree (kept for compatibility)
+    pub fn rebuild_distance_lists(&mut self) {
+        // No-op: mtree maintains itself automatically
+    }
+
+    /// Public version for benchmarks (always available)
+    pub fn rebuild_distance_lists_public(&mut self) {
+        self.rebuild_distance_lists();
+    }
+
+    /// Get label for an observer (helper method)
+    /// Returns the label with the highest faded value in label_observations
+    pub fn get_label(&self, index: usize, current_time: f64) -> Option<usize> {
+        self.get_label_observations(index, current_time)
+            .and_then(|lo| {
+                lo.iter()
+                    .max_by(|(_, &a), (_, &b)| {
+                        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(&label, _)| label)
             })
-            .collect();
-
-        // Aktualisiere Distanzen nur zwischen aktualisierten Observern
-        for &i in updated_indices {
-            for &j in updated_indices {
-                if i < j {
-                    // Vermeide Doppelarbeit
-                    if let (Some(data_i), Some(data_j)) =
-                        (updated_data.get(&i), updated_data.get(&j))
-                    {
-                        let distance = compute_distance(
-                            data_i,
-                            data_j,
-                            self.distance_metric,
-                            self.minkowski_p,
-                        );
-
-                        // Aktualisiere beide Richtungen
-                        if let Some(list_i) = self.distance_matrix.get_mut(i) {
-                            list_i.insert(j, distance);
-                        }
-                        if let Some(list_j) = self.distance_matrix.get_mut(j) {
-                            list_j.insert(i, distance);
-                        }
-                    }
-                }
-            }
-        }
     }
+}
 
-    /// Calculate Mahalanobis distance uniformity score for a subset of observers.
-    /// Requires feature "mahalanobis". Returns a score where lower = more uniform (convex).
-    #[cfg(feature = "mahalanobis")]
-    pub fn mahalanobis_uniformity_score(&self, observer_indices: Option<&[usize]>) -> f64 {
-        // Collect observer data based on indices
-        let observer_data: Vec<Vec<f64>> = match observer_indices {
-            Some(indices) => indices
-                .iter()
-                .filter_map(|&idx| self.get(idx).map(|obs| obs.data.clone()))
-                .collect(),
-            None => self
-                .iter_observers(true)
-                .map(|obs| obs.data.clone())
-                .collect(),
-        };
-
-        if observer_data.len() < 2 {
-            return 0.0; // No meaningful score for < 2 points
+// Clone kann jetzt direkt verwendet werden, da MTree Clone implementiert
+impl Clone for ObserverSet {
+    fn clone(&self) -> Self {
+        Self {
+            mtree: self.mtree.clone(),
+            point_by_index: self.point_by_index.clone(),
+            observations_list: self.observations_list.clone(),
+            index_to_obs_entry: self.index_to_obs_entry.clone(),
+            age_by_index: self.age_by_index.clone(),
+            label_observations_by_index: self.label_observations_by_index.clone(),
+            local_threshold_by_index: self.local_threshold_by_index.clone(),
+            distance_metric: self.distance_metric,
+            minkowski_p: self.minkowski_p,
+            fading: self.fading,
+            num_active: self.num_active,
+            global_threshold: self.global_threshold,
+            last_label: self.last_label,
+            last_active_observer: self.last_active_observer,
         }
-
-        // Calculate mean vector
-        let num_observers = observer_data.len();
-        let num_features = observer_data[0].len();
-
-        let mut mean = vec![0.0; num_features];
-        for obs_data in &observer_data {
-            for (j, &value) in obs_data.iter().enumerate() {
-                mean[j] += value;
-            }
-        }
-        for value in &mut mean {
-            *value /= num_observers as f64;
-        }
-
-        // Calculate covariance matrix manually
-        let mut cov_matrix = vec![vec![0.0; num_features]; num_features];
-        for obs_data in &observer_data {
-            for i in 0..num_features {
-                for j in 0..num_features {
-                    let diff_i = obs_data[i] - mean[i];
-                    let diff_j = obs_data[j] - mean[j];
-                    cov_matrix[i][j] += diff_i * diff_j;
-                }
-            }
-        }
-        for i in 0..num_features {
-            for j in 0..num_features {
-                cov_matrix[i][j] /= (num_observers - 1) as f64;
-            }
-        }
-
-        // Try to compute inverse of covariance matrix using our helper function
-        let inv_cov = match matrix_inverse_2x2_or_3x3(&cov_matrix) {
-            Some(inv) => inv,
-            None => {
-                // For singular matrices, use diagonal approximation
-                let mut inv_cov = vec![vec![0.0; num_features]; num_features];
-                for i in 0..num_features {
-                    if cov_matrix[i][i] > 1e-10 {
-                        inv_cov[i][i] = 1.0 / cov_matrix[i][i];
-                    } else {
-                        inv_cov[i][i] = 1.0; // Regularization
-                    }
-                }
-                inv_cov
-            }
-        };
-
-        // Calculate Mahalanobis distances for each observer
-        let mut distances = Vec::new();
-        for obs_data in &observer_data {
-            let diff: Vec<f64> = obs_data.iter().zip(&mean).map(|(x, m)| x - m).collect();
-
-            // Calculate diff^T * inv_cov * diff
-            let mut temp = vec![0.0; num_features];
-            for i in 0..num_features {
-                for j in 0..num_features {
-                    temp[i] += inv_cov[i][j] * diff[j];
-                }
-            }
-
-            let mut mahal_dist_sq = 0.0;
-            for i in 0..num_features {
-                mahal_dist_sq += diff[i] * temp[i];
-            }
-
-            distances.push(mahal_dist_sq.sqrt());
-        }
-
-        // Return mean distance as uniformity score
-        distances.iter().sum::<f64>() / distances.len() as f64
-    }
-
-    /// Clear all observers - O(n)
-    #[allow(dead_code)] // Für zukünftige Verwendung
-    pub fn clear(&mut self) {
-        self.observers_by_index.clear();
-        self.indices_by_obs.clear();
-        self.indices_by_score.clear();
     }
 }
 
 impl Default for ObserverSet {
     fn default() -> Self {
-        Self::new(DistanceMetric::Euclidean, None)
+        Self::new(DistanceMetric::Euclidean, None, None)
     }
-}
-
-/// Simple matrix inverse for 2x2 or 3x3 matrices (used only for Mahalanobis).
-#[cfg(feature = "mahalanobis")]
-fn matrix_inverse_2x2_or_3x3(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
-    let n = matrix.len();
-
-    if n == 2 {
-        let a = matrix[0][0];
-        let b = matrix[0][1];
-        let c = matrix[1][0];
-        let d = matrix[1][1];
-        let det = a * d - b * c;
-
-        if det.abs() < 1e-10 {
-            return None;
-        }
-
-        let inv_det = 1.0 / det;
-        Some(vec![
-            vec![d * inv_det, -b * inv_det],
-            vec![-c * inv_det, a * inv_det],
-        ])
-    } else if n == 3 {
-        // For 3x3, use simple cofactor method
-        let det = matrix_determinant_3x3(matrix);
-
-        if det.abs() < 1e-10 {
-            return None;
-        }
-
-        let inv_det = 1.0 / det;
-        let mut inv = vec![vec![0.0; 3]; 3];
-
-        // Compute cofactors
-        inv[0][0] = (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1]) * inv_det;
-        inv[0][1] = (matrix[0][2] * matrix[2][1] - matrix[0][1] * matrix[2][2]) * inv_det;
-        inv[0][2] = (matrix[0][1] * matrix[1][2] - matrix[0][2] * matrix[1][1]) * inv_det;
-
-        inv[1][0] = (matrix[1][2] * matrix[2][0] - matrix[1][0] * matrix[2][2]) * inv_det;
-        inv[1][1] = (matrix[0][0] * matrix[2][2] - matrix[0][2] * matrix[2][0]) * inv_det;
-        inv[1][2] = (matrix[0][2] * matrix[1][0] - matrix[0][0] * matrix[1][2]) * inv_det;
-
-        inv[2][0] = (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]) * inv_det;
-        inv[2][1] = (matrix[0][1] * matrix[2][0] - matrix[0][0] * matrix[2][1]) * inv_det;
-        inv[2][2] = (matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]) * inv_det;
-
-        Some(inv)
-    } else {
-        None
-    }
-}
-
-/// Calculate determinant of 3x3 matrix (used only for Mahalanobis).
-#[cfg(feature = "mahalanobis")]
-fn matrix_determinant_3x3(matrix: &[Vec<f64>]) -> f64 {
-    matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
-        - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
-        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
 }

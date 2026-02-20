@@ -2,11 +2,10 @@ use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use std::collections::HashMap;
 use std::f64;
 
-use crate::obs::{NeighborInfo, Observer};
-use crate::obset::ObserverSet;
+use crate::obs::{neighbor_distance, NeighborInfo};
+use crate::obset::{min_sample_size_hypergeometric, ObserverSet};
 use crate::utils::DistanceMetric;
 use crate::utils::{compute_median, data_to_matrix, scores_single_or_list_to_py};
 
@@ -19,14 +18,24 @@ pub struct SDO {
     rho: f64,
     #[pyo3(get, set)]
     pub(crate) x: usize,
-    k: usize, // Anzahl der Observer (Modellgröße)
+    k: usize,      // Anzahl der Observer (Modellgröße)
+    p_safe: f64,   // Probability threshold for x_safe calculation (default 0.98)
+    x_safe: usize, // Calculated safe sample size for k-NN search
 }
 
 #[pymethods]
 impl SDO {
     #[new]
-    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None))]
-    pub fn new(k: usize, x: usize, rho: f64, distance: String, minkowski_p: Option<f64>) -> Self {
+    #[pyo3(signature = (k, x, rho, distance = "euclidean".to_string(), minkowski_p = None, fading = None, p_safe = 0.98))]
+    pub fn new(
+        k: usize,
+        x: usize,
+        rho: f64,
+        distance: String,
+        minkowski_p: Option<f64>,
+        fading: Option<f64>,
+        p_safe: f64,
+    ) -> Self {
         let distance_metric = match distance.to_lowercase().as_str() {
             "manhattan" => DistanceMetric::Manhattan,
             "chebyshev" => DistanceMetric::Chebyshev,
@@ -35,16 +44,18 @@ impl SDO {
         };
 
         let instance = Self {
-            observers: ObserverSet::new(distance_metric, minkowski_p),
+            observers: ObserverSet::new(distance_metric, minkowski_p, fading),
             rho,
             x,
             k,
+            p_safe,
+            x_safe: x, // Initial value, will be updated when num_active is set
         };
+        // x_safe will be calculated after num_active is set in learn_impl
         instance
     }
 
     /// Lernt das Modell aus den Daten
-    /// Wenn time angegeben, wird dieser Wert für alle Observer als time gesetzt
     #[pyo3(signature = (data, *))]
     pub fn learn(&mut self, data: PyReadonlyArray2<f64>) -> PyResult<()> {
         // Konvertiere Daten zu Vec<Vec<f64>>
@@ -88,13 +99,13 @@ impl SDO {
         }
 
         let rows = active_observers.len();
-        let cols = active_observers[0].data.len();
+        let cols = active_observers[0].1.len(); // data is second element in tuple
         let array = PyArray2::zeros_bound(py, (rows, cols), false);
 
         unsafe {
             let mut array_mut = array.as_array_mut();
-            for (i, observer) in active_observers.iter().enumerate() {
-                for (j, &value) in observer.data.iter().enumerate() {
+            for (i, (_idx, data, _obs, _time, _age)) in active_observers.iter().enumerate() {
+                for (j, &value) in data.iter().enumerate() {
                     array_mut[[i, j]] = value;
                 }
             }
@@ -115,6 +126,46 @@ impl SDO {
         self.rho
     }
 
+    /// Set num_active and update x_safe accordingly
+    /// Should be used instead of directly calling observers.set_num_active()
+    pub(crate) fn set_num_active(&mut self, num_active: usize) {
+        self.observers.set_num_active(num_active);
+        self.update_x_safe();
+    }
+
+    /// Update x_safe based on current k, num_active, and x
+    fn update_x_safe(&mut self) {
+        let num_active = self.observers.get_num_active();
+        let k_total = self.observers.len();
+
+        if k_total == 0 || num_active == 0 {
+            self.x_safe = self.x;
+            return;
+        }
+
+        // Calculate x_safe using hypergeometric distribution
+        let x_safe_result = min_sample_size_hypergeometric(
+            k_total as u64,
+            num_active as u64,
+            self.x as u64,
+            self.p_safe,
+        );
+
+        self.x_safe = x_safe_result.map(|v| v as usize).unwrap_or_else(|| {
+            // Fallback: if calculation fails, use a conservative estimate
+            // Search at least x observers, but try to get enough to likely have x active
+            let ratio = num_active as f64 / k_total as f64;
+            if ratio > 0.0 {
+                // Estimate: need to sample enough to get x active with high probability
+                ((self.x as f64 / ratio).ceil() as usize)
+                    .min(k_total)
+                    .max(self.x)
+            } else {
+                self.x
+            }
+        });
+    }
+
     pub(crate) fn learn_impl(&mut self, data: &Vec<Vec<f64>>) {
         // Schritt 1: Sample
         let mut rng = thread_rng();
@@ -125,45 +176,42 @@ impl SDO {
 
         // Schritt 2: Erstelle ObserverSet mit allen Observers (ohne observations)
         for (idx, observer_data) in observers_data.iter().enumerate() {
-            let observer = Observer {
-                data: observer_data.clone(),
-                observations: 0.0,
-                time: 0.0,
-                age: data.len() as f64,
-                index: idx,
-                local_threshold: f64::INFINITY,
-                label_observations: HashMap::new(),
-                label_time: 0.0,
-            };
-            self.observers.insert(observer);
+            self.observers.insert(
+                idx,
+                observer_data.clone(),
+                0.0,               // observations
+                0.0,               // time
+                data.len() as f64, // age
+            );
         }
 
         // Schritt 3: Berechne observations für jeden Observer mit Nearest Neighbor Search
         // Für jeden Datenpunkt: Finde x nächste Observer (unter allen Observern) und erhöhe deren observations.
-        // learn: Some(true) → alle Observer werden durchsucht, Rückgabe in nearest_all (num_active ist hier noch 0).
+        // During learning, num_active is still 0, so we use x_safe = x (fallback)
+        // We search for x observers directly since all are "active" during learning
+        let x_safe_learn = self.x; // During learning, use x directly
+
         for data_point in data {
-            let (_nearest_active, nearest_all_opt) =
-                self.observers
-                    .search_neighbors_unified(data_point, self.x, Some(true), None);
-            let nearest_indices: Vec<usize> = nearest_all_opt
-                .as_ref()
-                .expect("learn=true ⇒ nearest_all is always filled")
+            // Use knn_search to get x nearest observers
+            let candidates = self.observers.knn_search(data_point, x_safe_learn);
+
+            // Extract indices (all are considered during learning)
+            let nearest_indices: Vec<usize> = candidates
                 .iter()
-                .map(|n| n.index)
+                .take(self.x)
+                .map(|(node, _)| node.value.1)
                 .collect();
 
             // Erhöhe observations für jeden dieser Observer um 1
             for idx in nearest_indices {
-                if let Some(observer) = self.observers.get(idx) {
-                    let current_obs = observer.observations;
+                if let Some(current_obs) = self.observers.get_observations(idx) {
                     self.observers.update_observations(idx, current_obs + 1.0);
                 }
             }
         }
 
-        // Set num_active
-        self.observers
-            .set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
+        // Set num_active (this also updates x_safe)
+        self.set_num_active(((self.observers.len() as f64) * (1.0 - self.rho)).ceil() as usize);
     }
 
     /// Vorhersage für einen einzelnen Punkt (Rust-intern).
@@ -177,22 +225,44 @@ impl SDO {
             panic!("No observers found during prediction!");
         }
 
-        // Suche nur unter den aktiven Observers (using optimized unified search mit aktiven info)
-        let (active_neighbors, all_neighbors_opt) = self
-            .observers
-            .search_neighbors_unified(point, self.x, learn, k_learn);
-        let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
+        // Calculate total search size: x_safe + k_learn if learning
+        let k_learn_val = k_learn.unwrap_or(0);
+        let total_search_size = if learn == Some(true) {
+            self.x_safe + k_learn_val
+        } else {
+            self.x_safe
+        };
 
-        if distances.is_empty() {
+        // Use knn_search to get candidates
+        let candidates = self.observers.knn_search(point, total_search_size);
+
+        // Extract x active neighbors (returns Vec<NeighborInfo>)
+        let active_neighbors = self.observers.extract_x_neighbors(&candidates, self.x, true);
+
+        if active_neighbors.is_empty() {
             panic!("No active observers found during prediction!");
         }
 
+        let distances: Vec<f64> = active_neighbors.iter().map(neighbor_distance).collect();
         let median = compute_median(&distances);
+
+        // For learn mode, return all candidates as all_neighbors (mtree structure as NeighborInfo)
+        let all_neighbors_opt = if learn == Some(true) {
+            Some(
+                candidates
+                    .iter()
+                    .take(total_search_size)
+                    .map(|(node, dist)| NeighborInfo::MTree(std::sync::Arc::clone(node), *dist))
+                    .collect(),
+            )
+        } else {
+            None
+        };
 
         (median, active_neighbors, all_neighbors_opt)
     }
 
-    /// Batch-Vorhersage (Rust-intern). Nutzt search_neighbors_unified_batch für mehrere Punkte.
+    /// Batch-Vorhersage (Rust-intern). Nutzt knn_search_batch für mehrere Punkte.
     pub(crate) fn predict_impl(
         &self,
         points: &[Vec<f64>],
@@ -205,30 +275,71 @@ impl SDO {
         if self.observers.is_empty() {
             panic!("No observers found during prediction!");
         }
-        let batch = self
-            .observers
-            .search_neighbors_unified_batch(points, self.x, learn, k_learn);
-        batch
+
+        // Calculate total search size: x_safe + k_learn if learning
+        let k_learn_val = k_learn.unwrap_or(0);
+        let total_search_size = if learn == Some(true) {
+            self.x_safe + k_learn_val
+        } else {
+            self.x_safe
+        };
+
+        // Use knn_search_batch to get candidates for all points
+        let candidates_batch = self.observers.knn_search_batch(points, total_search_size);
+
+        candidates_batch
             .into_iter()
-            .map(|(active_neighbors, all_neighbors_opt)| {
-                let distances: Vec<f64> = active_neighbors.iter().map(|n| n.distance).collect();
-                if distances.is_empty() {
+            .map(|candidates| {
+                // Extract x active neighbors (returns Vec<NeighborInfo>)
+                let active_neighbors =
+                    self.observers.extract_x_neighbors(&candidates, self.x, true);
+
+                if active_neighbors.is_empty() {
                     panic!("No active observers found during prediction!");
                 }
+
+                let distances: Vec<f64> = active_neighbors.iter().map(neighbor_distance).collect();
                 let median = compute_median(&distances);
+
+                // For learn mode, return all candidates as all_neighbors
+                let all_neighbors_opt = if learn == Some(true) {
+                    Some(
+                        candidates
+                            .iter()
+                            .take(total_search_size)
+                            .map(|(node, dist)| {
+                                NeighborInfo::MTree(std::sync::Arc::clone(node), *dist)
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+
                 (median, active_neighbors, all_neighbors_opt)
             })
             .collect()
     }
 
     /// Interne Methode, um einen Observer zu ersetzen (für SDOstream)
-    pub(crate) fn replace_observer(&mut self, old_index: usize, new_observer: Observer) -> bool {
-        self.observers.replace(old_index, new_observer)
+    /// Wird nicht mehr benötigt - replace() ist jetzt direkt auf ObserverSet
+    #[allow(dead_code)]
+    pub(crate) fn replace_observer_legacy(
+        &mut self,
+        _old_index: usize,
+        _new_index: usize,
+        _new_data: Vec<f64>,
+        _new_observations: f64,
+        _new_time: f64,
+        _new_age: f64,
+    ) -> bool {
+        // Legacy method - use observers.replace() directly
+        false
     }
 }
 
 impl Default for SDO {
     fn default() -> Self {
-        Self::new(200, 5, 0.2, "euclidean".to_string(), None)
+        Self::new(200, 5, 0.2, "euclidean".to_string(), None, None, 0.98)
     }
 }

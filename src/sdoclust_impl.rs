@@ -4,6 +4,7 @@ use pyo3::types::{PyList, PyTuple};
 use std::collections::{HashMap, HashSet};
 use std::f64;
 
+use crate::obs::neighbor_index;
 use crate::sdo_impl::SDO;
 use crate::utils::{data_to_matrix, label_score_results_to_py};
 
@@ -36,7 +37,7 @@ impl SDOclust {
         minkowski_p: Option<f64>,
     ) -> Self {
         Self {
-            sdo: SDO::new(k, x, rho, distance, minkowski_p),
+            sdo: SDO::new(k, x, rho, distance, minkowski_p, None, 0.98),
             chi,
             zeta,
             min_cluster_size,
@@ -84,21 +85,37 @@ impl SDOclust {
 
     /// Gibt die Cluster-Labels der aktiven Observer zurück (-1 = kein Label/Outlier).
     pub fn get_observer_labels(&self) -> Vec<i32> {
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = self.sdo.observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
         self.sdo
             .observers
             .iter_observers(true)
-            .map(|obs| obs.get_label().map(|l| l as i32).unwrap_or(-1))
+            .map(|(idx, _, _, _, _)| {
+                self.sdo
+                    .observers
+                    .get_label(idx, max_time)
+                    .map(|l| l as i32)
+                    .unwrap_or(-1)
+            })
             .collect()
     }
 
     /// Gibt die Anzahl der Cluster zurück
     pub fn n_clusters(&self) -> usize {
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = self.sdo.observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
         // Gehe durch alle aktiven Observer und sammle eindeutige Labels
         let unique_labels: HashSet<usize> = self
             .sdo
             .observers
             .iter_observers(true)
-            .filter_map(|obs| obs.get_label())
+            .filter_map(|(idx, _, _, _, _)| self.sdo.observers.get_label(idx, max_time))
             .collect();
         unique_labels.len()
     }
@@ -112,7 +129,7 @@ impl SDOclust {
     /// Debug/Inspection: Gibt den aktuellen global_threshold aus dem ObserverSet zurück.
     /// (Dieser Wert wird in `set_thresholds` gesetzt und in `find_connected_components` verwendet.)
     pub fn get_global_threshold(&self) -> f64 {
-        self.sdo.observers.global_threshold
+        self.sdo.observers.get_global_threshold()
     }
 
     /// Debug: Gibt die gefundenen Connected Components zurück (ohne Labels).
@@ -135,25 +152,41 @@ impl SDOclust {
             let empty = PyArray2::zeros_bound(py, (0, 0), false);
             return Ok((empty.unbind(), vec![], vec![]));
         }
-        let local_thresholds: Vec<f64> =
-            active_observers.iter().map(|o| o.local_threshold).collect();
-        let global_threshold = local_thresholds.iter().sum::<f64>() / local_thresholds.len() as f64;
+        let observers = &self.sdo.observers;
+        let local_thresholds: Vec<f64> = active_observers
+            .iter()
+            .map(|(idx, _data, _obs, _time, _age)| {
+                observers.get_local_threshold(*idx).unwrap_or(f64::INFINITY)
+            })
+            .collect();
+        let global_threshold = self.sdo.observers.get_global_threshold();
         let zeta = self.zeta;
         let final_radii: Vec<f64> = local_thresholds
             .iter()
             .map(|h| zeta * h + (1.0 - zeta) * global_threshold)
             .collect();
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = self.sdo.observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
+        
         let labels: Vec<i32> = active_observers
             .iter()
-            .map(|o| o.get_label().map(|l| l as i32).unwrap_or(-1))
+            .map(|(idx, _, _, _, _)| {
+                self.sdo
+                    .observers
+                    .get_label(*idx, max_time)
+                    .map(|l| l as i32)
+                    .unwrap_or(-1)
+            })
             .collect();
         let rows = active_observers.len();
-        let cols = active_observers[0].data.len();
+        let cols = active_observers[0].1.len(); // data is second element
         let array = PyArray2::zeros_bound(py, (rows, cols), false);
         unsafe {
             let mut arr = array.as_array_mut();
-            for (i, obs) in active_observers.iter().enumerate() {
-                for (j, &v) in obs.data.iter().enumerate() {
+            for (i, (_idx, data, _obs, _time, _age)) in active_observers.iter().enumerate() {
+                for (j, &v) in data.iter().enumerate() {
                     arr[[i, j]] = v;
                 }
             }
@@ -173,15 +206,20 @@ impl SDOclust {
         let mut distance_matrix: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
 
         // Sammle alle Observer-Daten
-        for observer in self.sdo.observers.iter_observers(false) {
-            let is_active = self.sdo.observers.is_active(observer.index);
+        for (idx, data, observations, _time, age) in self.sdo.observers.iter_observers(false) {
+            let is_active = self.sdo.observers.is_active(idx);
+            let local_threshold = self
+                .sdo
+                .observers
+                .get_local_threshold(idx)
+                .unwrap_or(f64::INFINITY);
             observers_data.push((
-                observer.data.clone(),
-                observer.observations,
-                observer.age,
+                data.clone(),
+                observations,
+                age,
                 is_active,
-                observer.local_threshold,
-                observer.index,
+                local_threshold,
+                idx,
             ));
         }
 
@@ -190,7 +228,7 @@ impl SDOclust {
             .sdo
             .observers
             .iter_observers(true)
-            .map(|obs| obs.index)
+            .map(|(idx, _, _, _, _)| idx)
             .collect();
         let active_set: std::collections::HashSet<usize> = active_indices.iter().copied().collect();
 
@@ -291,15 +329,18 @@ impl SDOclust {
     pub fn predict_point(&self, point: &[f64], learn: Option<bool>) -> (i32, f64) {
         let (median, active_neighbors, _all_neighbors_opt) =
             self.sdo.predict_point(point, learn, None);
-        let nearest_indices: Vec<usize> = active_neighbors.iter().map(|n| n.index).collect();
+        let nearest_indices: Vec<usize> = active_neighbors.iter().map(neighbor_index).collect();
+
+        // Bestimme maximale Zeit aller Observer als current_time
+        let max_time = self.sdo.observers.iter_observers(false)
+            .map(|(_, _, _, time, _)| time)
+            .fold(0.0, f64::max);
 
         // Zähle die Häufigkeit der Labels
         let mut label_counts: HashMap<usize, usize> = HashMap::new();
         for idx in nearest_indices {
-            if let Some(obs) = self.sdo.observers.get(idx) {
-                if let Some(label) = obs.get_label() {
-                    *label_counts.entry(label).or_insert(0) += 1;
-                }
+            if let Some(label) = self.sdo.observers.get_label(idx, max_time) {
+                *label_counts.entry(label).or_insert(0) += 1;
             }
         }
 
